@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use crate::{Error, Result};
+use tracing::warn;
 
 pub type JobId = i32;
 
@@ -113,34 +114,42 @@ pub struct Supply {
 }
 
 impl Supply {
+    /// Pairs `names` with `levels` up to the shorter list's length.
+    ///
+    /// A length mismatch means cupsd sent a malformed marker attribute for
+    /// this one queue. Spec ¤9 promises that one bad attribute never blanks
+    /// the popup, so this logs and degrades to the overlapping prefix rather
+    /// than failing the whole printer.
     pub fn decode_list(
         names: &[String],
         levels: &[i32],
         types: &[String],
         colours: &[String],
         low: &[i32],
-    ) -> Result<Vec<Supply>> {
+    ) -> Vec<Supply> {
         if names.len() != levels.len() {
-            return Err(Error::decode(
-                "marker-levels",
-                format!("{} levels for {} names", levels.len(), names.len()),
-            ));
+            warn!(
+                "marker-levels: {} levels for {} names; truncating to the shorter list",
+                levels.len(),
+                names.len()
+            );
         }
 
-        Ok(names
+        names
             .iter()
+            .zip(levels.iter())
             .enumerate()
-            .map(|(i, name)| Supply {
+            .map(|(i, (name, level))| Supply {
                 name: name.clone(),
                 kind: types.get(i).cloned(),
                 colour: colours.get(i).cloned(),
-                level: match levels[i] {
+                level: match *level {
                     n if n < 0 => SupplyLevel::Unknown,
                     n => SupplyLevel::Percent(n.min(100) as u8),
                 },
                 low_threshold: low.get(i).copied(),
             })
-            .collect())
+            .collect()
     }
 }
 
@@ -166,7 +175,10 @@ impl Printer {
 
         Ok(Printer {
             name: a.require_text("printer-name")?,
-            uri: a.text("printer-uri-supported").unwrap_or_default(),
+            // `ipp` returns an `Array` (not a scalar) when cupsd advertises more
+            // than one URI (e.g. both ipp and ipps), and `Attrs::text` reads
+            // only scalars. Take the first of the possibly-many values instead.
+            uri: a.texts("printer-uri-supported").into_iter().next().unwrap_or_default(),
             info: a.text("printer-info"),
             location: a.text("printer-location"),
             state: PrinterState::from_ipp(a.require_int("printer-state")?)?,
@@ -178,7 +190,7 @@ impl Printer {
                 &a.texts("marker-types"),
                 &a.texts("marker-colors"),
                 &a.ints("marker-low-levels"),
-            )?,
+            ),
             is_default: false,
         })
     }
@@ -474,8 +486,7 @@ mod tests {
             &s(&["ink-cartridge", "ink-cartridge"]),
             &s(&["#000000", "#00FFFF"]),
             &[10, 10],
-        )
-        .unwrap();
+        );
 
         assert_eq!(supplies.len(), 2);
         assert_eq!(supplies[0].name, "Black Ink");
@@ -487,8 +498,7 @@ mod tests {
 
     #[test]
     fn negative_level_is_unknown_not_zero() {
-        let supplies =
-            Supply::decode_list(&s(&["Drum"]), &[-1], &[], &[], &[]).unwrap();
+        let supplies = Supply::decode_list(&s(&["Drum"]), &[-1], &[], &[], &[]);
         assert_eq!(supplies[0].level, SupplyLevel::Unknown);
         assert_eq!(supplies[0].kind, None);
         assert_eq!(supplies[0].colour, None);
@@ -497,19 +507,47 @@ mod tests {
 
     #[test]
     fn level_above_100_is_clamped() {
-        let supplies =
-            Supply::decode_list(&s(&["Weird"]), &[150], &[], &[], &[]).unwrap();
+        let supplies = Supply::decode_list(&s(&["Weird"]), &[150], &[], &[], &[]);
         assert_eq!(supplies[0].level, SupplyLevel::Percent(100));
     }
 
     #[test]
-    fn mismatched_names_and_levels_is_a_decode_error() {
-        let err = Supply::decode_list(&s(&["A", "B"]), &[50], &[], &[], &[]).unwrap_err();
-        assert!(err.to_string().contains("marker-levels"));
+    fn mismatched_names_and_levels_truncates_rather_than_erroring() {
+        // Spec ¤9: one malformed attribute never blanks the whole queue.
+        let supplies = Supply::decode_list(&s(&["A", "B"]), &[50], &[], &[], &[]);
+        assert_eq!(supplies.len(), 1);
+        assert_eq!(supplies[0].name, "A");
+        assert_eq!(supplies[0].level, SupplyLevel::Percent(50));
     }
 
     #[test]
     fn no_markers_yields_no_supplies() {
-        assert!(Supply::decode_list(&[], &[], &[], &[], &[]).unwrap().is_empty());
+        assert!(Supply::decode_list(&[], &[], &[], &[], &[]).is_empty());
+    }
+
+    #[test]
+    fn multi_valued_printer_uri_takes_the_first_value() {
+        // `printer_group` already seeds a scalar printer-uri-supported, and
+        // IppAttributeGroup::get returns the first match by name, so this
+        // builds the group by hand to put the Array value where the decoder
+        // will actually see it.
+        let mut g = IppAttributeGroup::new(DelimiterTag::PrinterAttributes);
+        for (name, value) in [
+            ("printer-name", IppValue::NameWithoutLanguage("HP-8210".try_into().unwrap())),
+            (
+                "printer-uri-supported",
+                IppValue::Array(vec![
+                    IppValue::Uri("ipp://localhost/printers/HP-8210".try_into().unwrap()),
+                    IppValue::Uri("ipps://localhost/printers/HP-8210".try_into().unwrap()),
+                ]),
+            ),
+            ("printer-state", IppValue::Enum(3)),
+            ("printer-is-accepting-jobs", IppValue::Boolean(true)),
+        ] {
+            g.attributes_mut().push(IppAttribute::with_name(name, value).unwrap());
+        }
+
+        let p = Printer::decode(&g).unwrap();
+        assert_eq!(p.uri, "ipp://localhost/printers/HP-8210");
     }
 }

@@ -6,6 +6,8 @@ use ipp::{
 };
 use tracing::warn;
 
+use std::sync::Mutex;
+
 use crate::{Error, Job, JobId, Printer, Result, lpoptions};
 
 const LOCAL_CUPS: &str = "http://localhost:631";
@@ -15,6 +17,12 @@ pub struct CupsClient {
     inner: AsyncIppClient,
     base: String,
     user: String,
+    /// Cache for `default_printer`. `None` means "not yet resolved this
+    /// cycle"; `Some(None)` means "resolved, and there is no default".
+    /// Populated lazily and cleared by `invalidate_default_printer_cache`,
+    /// so a fresh `Default` per poll never costs a `CUPS-Get-Default`
+    /// round trip unless the caller explicitly asks to resync.
+    default_cache: Mutex<Option<Option<String>>>,
 }
 
 impl CupsClient {
@@ -33,11 +41,8 @@ impl CupsClient {
             inner: AsyncIppClient::new(parsed),
             base: uri.trim_end_matches('/').to_string(),
             user: user.to_string(),
+            default_cache: Mutex::new(None),
         })
-    }
-
-    pub(crate) fn user(&self) -> &str {
-        &self.user
     }
 
     /// The IPP URI for one queue, e.g. `http://localhost:631/printers/HP-8210`.
@@ -140,17 +145,35 @@ impl CupsClient {
     }
 
     /// The user's `lpoptions` choice if they made one, else the server's default.
+    ///
+    /// Cached after the first resolution so the 3-second poll loop does not
+    /// pay for a `CUPS-Get-Default` round trip every cycle when there is no
+    /// `lpoptions` file. Call `invalidate_default_printer_cache` to force a
+    /// fresh lookup (the poll loop does this on every resynchronisation).
     pub async fn default_printer(&self) -> Option<String> {
-        if let Some(chosen) = lpoptions::default_printer() {
-            return Some(chosen);
+        if let Some(cached) = self.default_cache.lock().unwrap().clone() {
+            return cached;
         }
-        match self.server_default().await {
-            Ok(name) => name,
-            Err(e) => {
-                warn!("cannot read the default printer: {e}");
-                None
-            }
-        }
+
+        let resolved = match lpoptions::default_printer() {
+            Some(chosen) => Some(chosen),
+            None => match self.server_default().await {
+                Ok(name) => name,
+                Err(e) => {
+                    warn!("cannot read the default printer: {e}");
+                    None
+                }
+            },
+        };
+
+        *self.default_cache.lock().unwrap() = Some(resolved.clone());
+        resolved
+    }
+
+    /// Forces the next `default_printer` call to resolve again instead of
+    /// reusing the cached value.
+    pub(crate) fn invalidate_default_printer_cache(&self) {
+        *self.default_cache.lock().unwrap() = None;
     }
 
     /// Attributes `Printer::decode` needs. Without this, `CUPS-Get-Printers`
@@ -324,6 +347,16 @@ impl WhichJobs {
 
 impl CupsClient {
     /// Builds a `Cancel-Job` / `Hold-Job` / `Release-Job` request.
+    ///
+    /// Addresses the job via `<base>/printers/<printer>`, which assumes
+    /// `printer` names a CUPS printer, not a CUPS *class*. A job queued
+    /// against a class would decode with `job.printer` set from
+    /// `job-printer-uri` (the member printer that actually picked it up, per
+    /// `Job::decode`), so a class job's controls would point at the wrong
+    /// resource and the action would fail against that URI. v1 has no UI for
+    /// classes, so this is not exercised in practice, but a future class
+    /// integration must resolve the class URI here rather than reusing this
+    /// printer-shaped path unchanged.
     pub(crate) fn job_action_request(
         &self,
         operation: Operation,
@@ -430,12 +463,27 @@ impl CupsClient {
     /// This is the applet's event source. v1 does not use IPP subscriptions:
     /// CUPS's `notify-wait` does not block and the daemon asks clients to poll
     /// once a minute, far worse than the 3-second poll here.
+    ///
+    /// Requires a tokio runtime with the `time` driver enabled (this crate's
+    /// `tokio` dependency only pulls in the `time` feature, not a full
+    /// runtime): the returned stream calls `tokio::time::sleep` between polls
+    /// and between retries. A caller polling this crate from a non-tokio
+    /// executor — the portal-backed backend this may grow later, for
+    /// instance — will need to drive it from inside a tokio context, e.g. via
+    /// a dedicated `tokio::runtime::Runtime` bridged into that executor.
     pub fn events(&self) -> impl Stream<Item = Result<PrinterEvent>> + '_ {
         async_stream::stream! {
             let mut previous: Option<Snapshot> = None;
             let mut backoff = Duration::ZERO;
 
             loop {
+                if previous.is_none() {
+                    // Starting up, or recovering after a failure: re-resolve
+                    // the default printer rather than trusting a cache that
+                    // may predate the outage.
+                    self.invalidate_default_printer_cache();
+                }
+
                 match self.snapshot().await {
                     Ok(current) => {
                         backoff = Duration::ZERO;
@@ -526,6 +574,26 @@ mod tests {
             1,
             "exactly one queue should be marked default"
         );
+    }
+
+    #[tokio::test]
+    async fn default_printer_is_cached_until_invalidated() {
+        let client = CupsClient::with_uri("http://localhost:631", "tester").unwrap();
+
+        // Prime the cache directly, bypassing lpoptions/network resolution
+        // entirely. If `default_printer` reused the cache correctly, it
+        // returns this value without touching the filesystem or the
+        // network; if the cache were skipped it would fall through to
+        // `server_default`, which would fail fast against nothing
+        // listening on this URI in the test environment.
+        *client.default_cache.lock().unwrap() = Some(Some("Cached".to_string()));
+        assert_eq!(client.default_printer().await.as_deref(), Some("Cached"));
+
+        // A second call must not re-resolve either.
+        assert_eq!(client.default_printer().await.as_deref(), Some("Cached"));
+
+        client.invalidate_default_printer_cache();
+        assert!(client.default_cache.lock().unwrap().is_none());
     }
 
     #[test]
