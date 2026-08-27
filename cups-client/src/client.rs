@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use ipp::{
-    operation::{IppOperation, cups::CupsGetPrinters},
+    operation::{GetJobs, IppOperation, cups::CupsGetPrinters},
     prelude::*,
 };
 use tracing::warn;
 
-use crate::{Error, Printer, Result, lpoptions};
+use crate::{Error, Job, Printer, Result, lpoptions};
 
 const LOCAL_CUPS: &str = "http://localhost:631";
 
@@ -49,12 +49,12 @@ impl CupsClient {
 
     pub(crate) async fn send(
         &self,
-        op: impl IppOperation,
+        req: impl Into<IppRequestResponse>,
         label: &str,
     ) -> Result<IppRequestResponse> {
         let resp = self
             .inner
-            .send(op)
+            .send(req.into())
             .await
             .map_err(|e| Error::Transport(e.to_string()))?;
         Self::check_status(&resp, label)?;
@@ -107,12 +107,7 @@ impl CupsClient {
             .map_err(|e| Error::decode("requested-attributes", e.to_string()))?,
         );
 
-        let resp = self
-            .inner
-            .send(request)
-            .await
-            .map_err(|e| Error::Transport(e.to_string()))?;
-        Self::check_status(&resp, "CUPS-Get-Default")?;
+        let resp = self.send(request, "CUPS-Get-Default").await?;
 
         Ok(resp
             .attributes()
@@ -181,6 +176,111 @@ impl CupsClient {
 
         Ok(Self::decode_printers(&resp, default.as_deref()))
     }
+
+    pub(crate) fn decode_jobs(resp: &IppRequestResponse) -> Vec<Job> {
+        resp.attributes()
+            .groups_of(DelimiterTag::JobAttributes)
+            .filter_map(|group| match Job::decode(group) {
+                Ok(job) => Some(job),
+                Err(e) => {
+                    warn!("skipping undecodable job: {e}");
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Attributes `Job::decode` needs. CUPS returns only `job-id` without this.
+    const JOB_ATTRIBUTES: &'static [&'static str] = &[
+        "job-id",
+        "job-state",
+        "job-state-reasons",
+        "job-name",
+        "job-printer-uri",
+        "job-originating-user-name",
+        "time-at-creation",
+        "job-impressions",
+        "job-impressions-completed",
+    ];
+
+    /// Builds the `Get-Jobs` request. Split out so its shape can be tested.
+    pub(crate) fn jobs_request(&self, which: WhichJobs) -> Result<IppRequestResponse> {
+        let root: Uri = self
+            .base
+            .parse()
+            .map_err(|e| Error::Transport(format!("bad CUPS uri: {e}")))?;
+
+        let op = GetJobs::new(root, Some(self.user.clone()))
+            .map_err(|e| Error::Transport(e.to_string()))?;
+
+        let mut request = op.into_ipp_request();
+
+        let mut wanted = Vec::with_capacity(Self::JOB_ATTRIBUTES.len());
+        for name in Self::JOB_ATTRIBUTES {
+            wanted.push(IppValue::Keyword(
+                (*name)
+                    .try_into()
+                    .map_err(|_| Error::decode(*name, "keyword too long"))?,
+            ));
+        }
+        request.attributes_mut().add(
+            DelimiterTag::OperationAttributes,
+            IppAttribute::with_name("requested-attributes", IppValue::Array(wanted))
+                .map_err(|e| Error::decode("requested-attributes", e.to_string()))?,
+        );
+
+        request.attributes_mut().add(
+            DelimiterTag::OperationAttributes,
+            IppAttribute::with_name(
+                "which-jobs",
+                IppValue::Keyword(
+                    which
+                        .as_keyword()
+                        .try_into()
+                        .map_err(|_| Error::decode("which-jobs", "keyword too long"))?,
+                ),
+            )
+            .map_err(|e| Error::decode("which-jobs", e.to_string()))?,
+        );
+        request.attributes_mut().add(
+            DelimiterTag::OperationAttributes,
+            IppAttribute::with_name("my-jobs", IppValue::Boolean(true))
+                .map_err(|e| Error::decode("my-jobs", e.to_string()))?,
+        );
+
+        Ok(request)
+    }
+
+    /// Lists the current user's jobs across every queue.
+    pub async fn jobs(&self, which: WhichJobs) -> Result<Vec<Job>> {
+        let request = self.jobs_request(which)?;
+
+        let resp = self
+            .inner
+            .send(request)
+            .await
+            .map_err(|e| Error::Transport(e.to_string()))?;
+        Self::check_status(&resp, "Get-Jobs")?;
+
+        Ok(Self::decode_jobs(&resp))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WhichJobs {
+    /// Jobs still in the queue.
+    NotCompleted,
+    /// Jobs that have finished, been cancelled, or aborted.
+    Completed,
+}
+
+impl WhichJobs {
+    pub(crate) fn as_keyword(&self) -> &'static str {
+        match self {
+            WhichJobs::NotCompleted => "not-completed",
+            WhichJobs::Completed => "completed",
+        }
+    }
 }
 
 #[cfg(test)]
@@ -240,5 +340,45 @@ mod tests {
             1,
             "exactly one queue should be marked default"
         );
+    }
+
+    #[test]
+    fn which_jobs_maps_to_the_ipp_keyword() {
+        assert_eq!(WhichJobs::NotCompleted.as_keyword(), "not-completed");
+        assert_eq!(WhichJobs::Completed.as_keyword(), "completed");
+    }
+
+    #[test]
+    fn the_jobs_request_asks_for_every_attribute_the_decoder_needs() {
+        let client = CupsClient::with_uri("http://localhost:631", "tester").unwrap();
+        let request = client.jobs_request(WhichJobs::NotCompleted).unwrap();
+
+        let group = request
+            .attributes()
+            .first_of(DelimiterTag::OperationAttributes)
+            .unwrap();
+        let attrs = crate::attrs::Attrs::new(group);
+
+        let requested = attrs.texts("requested-attributes");
+        // Without these, CUPS answers with job-id alone and every job is skipped.
+        for needed in ["job-id", "job-state", "job-printer-uri", "job-impressions"] {
+            assert!(requested.contains(&needed.to_string()), "missing {needed}");
+        }
+        assert_eq!(attrs.text("which-jobs").as_deref(), Some("not-completed"));
+        assert_eq!(attrs.bool("my-jobs"), Some(true));
+    }
+
+    #[test]
+    fn a_response_with_no_job_groups_yields_no_jobs() {
+        // CUPS answers an empty queue with operation attributes only.
+        assert!(CupsClient::decode_jobs(&fixture()).is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a running cupsd"]
+    async fn lists_jobs_from_the_live_daemon() {
+        let client = CupsClient::local().unwrap();
+        let jobs = client.jobs(WhichJobs::NotCompleted).await.unwrap();
+        assert!(jobs.iter().all(|j| j.state.is_active()));
     }
 }
