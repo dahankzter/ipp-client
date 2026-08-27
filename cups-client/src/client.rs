@@ -350,7 +350,32 @@ use crate::{
     events::{POLL_INTERVAL, Snapshot, backoff_after},
 };
 use futures::Stream;
+use ipp::operation::GetPrinterAttributes;
 use std::time::Duration;
+
+impl CupsClient {
+    /// Reads one queue's attributes, addressing it by its full IPP URI.
+    pub async fn printer_at(&self, uri: &str) -> Result<Printer> {
+        let parsed: Uri = uri
+            .parse()
+            .map_err(|e| Error::Transport(format!("bad printer uri {uri}: {e}")))?;
+        let op = GetPrinterAttributes::new(parsed)
+            .map_err(|e| Error::Transport(e.to_string()))?;
+        let resp = self.send(op, "Get-Printer-Attributes").await?;
+
+        resp.attributes()
+            .groups_of(DelimiterTag::PrinterAttributes)
+            .next()
+            .ok_or_else(|| Error::decode("printer-attributes", "no printer group in response"))
+            .and_then(Printer::decode)
+    }
+
+    /// Reads one CUPS queue by name.
+    pub async fn printer(&self, name: &str) -> Result<Printer> {
+        let uri = self.printer_uri(name)?;
+        self.printer_at(&uri.to_string()).await
+    }
+}
 
 impl CupsClient {
     /// Reads printers and active jobs in one pass.
