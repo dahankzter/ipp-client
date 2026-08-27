@@ -2,6 +2,7 @@
 
 //! Async CUPS client speaking IPP to the local print daemon.
 
+mod attrs;
 mod error;
 mod model;
 
