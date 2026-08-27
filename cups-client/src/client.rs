@@ -135,10 +135,50 @@ impl CupsClient {
         }
     }
 
+    /// Attributes `Printer::decode` needs. Without this, `CUPS-Get-Printers`
+    /// returns every attribute CUPS knows about the queue.
+    const PRINTER_ATTRIBUTES: &'static [&'static str] = &[
+        "printer-name",
+        "printer-uri-supported",
+        "printer-info",
+        "printer-location",
+        "printer-state",
+        "printer-state-reasons",
+        "printer-is-accepting-jobs",
+        "marker-names",
+        "marker-levels",
+        "marker-types",
+        "marker-colors",
+        "marker-low-levels",
+    ];
+
     /// Lists all queues known to CUPS.
     pub async fn printers(&self) -> Result<Vec<Printer>> {
         let default = self.default_printer().await;
-        let resp = self.send(CupsGetPrinters::new(), "CUPS-Get-Printers").await?;
+
+        let mut request = CupsGetPrinters::new().into_ipp_request();
+
+        let mut wanted = Vec::with_capacity(Self::PRINTER_ATTRIBUTES.len());
+        for name in Self::PRINTER_ATTRIBUTES {
+            wanted.push(IppValue::Keyword(
+                (*name)
+                    .try_into()
+                    .map_err(|_| Error::decode(*name, "keyword too long"))?,
+            ));
+        }
+        request.attributes_mut().add(
+            DelimiterTag::OperationAttributes,
+            IppAttribute::with_name("requested-attributes", IppValue::Array(wanted))
+                .map_err(|e| Error::decode("requested-attributes", e.to_string()))?,
+        );
+
+        let resp = self
+            .inner
+            .send(request)
+            .await
+            .map_err(|e| Error::Transport(e.to_string()))?;
+        Self::check_status(&resp, "CUPS-Get-Printers")?;
+
         Ok(Self::decode_printers(&resp, default.as_deref()))
     }
 }
