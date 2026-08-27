@@ -54,6 +54,22 @@ impl Snapshot {
     }
 }
 
+use std::time::Duration;
+
+/// How often the poll path re-reads the queue.
+pub const POLL_INTERVAL: Duration = Duration::from_secs(3);
+
+const MAX_BACKOFF: Duration = Duration::from_secs(30);
+
+/// Doubles the retry delay, capped at 30 s.
+pub(crate) fn backoff_after(previous: Duration) -> Duration {
+    if previous.is_zero() {
+        Duration::from_secs(1)
+    } else {
+        (previous * 2).min(MAX_BACKOFF)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,5 +161,18 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert!(matches!(events[0], PrinterEvent::JobRemoved(1)));
         assert!(matches!(&events[1], PrinterEvent::JobAdded(j) if j.id == 2));
+    }
+
+    #[test]
+    fn backoff_grows_then_caps() {
+        assert_eq!(backoff_after(Duration::ZERO), Duration::from_secs(1));
+        assert_eq!(backoff_after(Duration::from_secs(1)), Duration::from_secs(2));
+        assert_eq!(backoff_after(Duration::from_secs(16)), Duration::from_secs(30));
+        assert_eq!(backoff_after(Duration::from_secs(30)), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn poll_interval_is_three_seconds() {
+        assert_eq!(POLL_INTERVAL, Duration::from_secs(3));
     }
 }

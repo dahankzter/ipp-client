@@ -345,6 +345,66 @@ impl CupsClient {
     }
 }
 
+use crate::{
+    PrinterEvent,
+    events::{POLL_INTERVAL, Snapshot, backoff_after},
+};
+use futures::Stream;
+use std::time::Duration;
+
+impl CupsClient {
+    /// Reads printers and active jobs in one pass.
+    pub(crate) async fn snapshot(&self) -> Result<Snapshot> {
+        Ok(Snapshot {
+            printers: self.printers().await?,
+            jobs: self.jobs(WhichJobs::NotCompleted).await?,
+        })
+    }
+
+    /// Polls CUPS and yields the changes. Never ends; retries with backoff on error.
+    ///
+    /// This is the applet's event source. v1 does not use IPP subscriptions:
+    /// CUPS's `notify-wait` does not block and the daemon asks clients to poll
+    /// once a minute, far worse than the 3-second poll here.
+    pub fn events(&self) -> impl Stream<Item = Result<PrinterEvent>> + '_ {
+        async_stream::stream! {
+            let mut previous: Option<Snapshot> = None;
+            let mut backoff = Duration::ZERO;
+
+            loop {
+                match self.snapshot().await {
+                    Ok(current) => {
+                        backoff = Duration::ZERO;
+
+                        match previous.take() {
+                            // First poll, or first poll after a failure.
+                            None => yield Ok(PrinterEvent::Resynchronised {
+                                printers: current.printers.clone(),
+                                jobs: current.jobs.clone(),
+                            }),
+                            Some(before) => {
+                                for event in before.diff(&current) {
+                                    yield Ok(event);
+                                }
+                            }
+                        }
+
+                        previous = Some(current);
+                        tokio::time::sleep(POLL_INTERVAL).await;
+                    }
+                    Err(e) => {
+                        // Drop the stale snapshot so recovery re-emits Resynchronised.
+                        previous = None;
+                        yield Err(e);
+                        backoff = backoff_after(backoff);
+                        tokio::time::sleep(backoff).await;
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

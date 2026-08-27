@@ -9,6 +9,7 @@ ipp.workspace = true
 futures.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+tokio.workspace = true
+async-stream = "0.3"
 
 [dev-dependencies]
-tokio = { workspace = true }
