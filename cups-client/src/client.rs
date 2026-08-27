@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use ipp::{
-    operation::{GetJobs, IppOperation, cups::CupsGetPrinters},
+    operation::{GetJobAttributes, GetJobs, IppOperation, cups::CupsGetPrinters},
     prelude::*,
 };
 use tracing::warn;
@@ -71,6 +71,29 @@ impl CupsClient {
                 status: format!("{status:?}"),
             })
         }
+    }
+
+    /// Adds `requested-attributes` to an operation group. Without it CUPS
+    /// answers with its own idea of a default set, which omits most of what
+    /// the decoders need.
+    pub(crate) fn request_attributes(
+        request: &mut IppRequestResponse,
+        names: &[&str],
+    ) -> Result<()> {
+        let mut wanted = Vec::with_capacity(names.len());
+        for name in names {
+            wanted.push(IppValue::Keyword(
+                (*name)
+                    .try_into()
+                    .map_err(|_| Error::decode(*name, "keyword too long"))?,
+            ));
+        }
+        request.attributes_mut().add(
+            DelimiterTag::OperationAttributes,
+            IppAttribute::with_name("requested-attributes", IppValue::Array(wanted))
+                .map_err(|e| Error::decode("requested-attributes", e.to_string()))?,
+        );
+        Ok(())
     }
 
     /// Decodes every printer group, skipping and logging ones that fail.
@@ -152,20 +175,7 @@ impl CupsClient {
         let default = self.default_printer().await;
 
         let mut request = CupsGetPrinters::new().into_ipp_request();
-
-        let mut wanted = Vec::with_capacity(Self::PRINTER_ATTRIBUTES.len());
-        for name in Self::PRINTER_ATTRIBUTES {
-            wanted.push(IppValue::Keyword(
-                (*name)
-                    .try_into()
-                    .map_err(|_| Error::decode(*name, "keyword too long"))?,
-            ));
-        }
-        request.attributes_mut().add(
-            DelimiterTag::OperationAttributes,
-            IppAttribute::with_name("requested-attributes", IppValue::Array(wanted))
-                .map_err(|e| Error::decode("requested-attributes", e.to_string()))?,
-        );
+        Self::request_attributes(&mut request, Self::PRINTER_ATTRIBUTES)?;
 
         let resp = self
             .inner
@@ -214,20 +224,7 @@ impl CupsClient {
             .map_err(|e| Error::Transport(e.to_string()))?;
 
         let mut request = op.into_ipp_request();
-
-        let mut wanted = Vec::with_capacity(Self::JOB_ATTRIBUTES.len());
-        for name in Self::JOB_ATTRIBUTES {
-            wanted.push(IppValue::Keyword(
-                (*name)
-                    .try_into()
-                    .map_err(|_| Error::decode(*name, "keyword too long"))?,
-            ));
-        }
-        request.attributes_mut().add(
-            DelimiterTag::OperationAttributes,
-            IppAttribute::with_name("requested-attributes", IppValue::Array(wanted))
-                .map_err(|e| Error::decode("requested-attributes", e.to_string()))?,
-        );
+        Self::request_attributes(&mut request, Self::JOB_ATTRIBUTES)?;
 
         request.attributes_mut().add(
             DelimiterTag::OperationAttributes,
@@ -263,6 +260,48 @@ impl CupsClient {
         Self::check_status(&resp, "Get-Jobs")?;
 
         Ok(Self::decode_jobs(&resp))
+    }
+
+    /// Builds the `Get-Job-Attributes` request. Split out so its shape can be tested.
+    pub(crate) fn job_request(&self, printer: &str, id: JobId) -> Result<IppRequestResponse> {
+        let uri = self.printer_uri(printer)?;
+
+        let op = GetJobAttributes::new(uri, id, Some(self.user.clone()))
+            .map_err(|e| Error::Transport(e.to_string()))?;
+
+        let mut request = op.into_ipp_request();
+        Self::request_attributes(&mut request, Self::JOB_ATTRIBUTES)?;
+
+        Ok(request)
+    }
+
+    /// Reads one job by id, including jobs that have already left the queue.
+    ///
+    /// `Get-Jobs` with `which-jobs=not-completed` drops a job the instant it
+    /// reaches a terminal state, so the only way to learn *how* a job ended is
+    /// to ask for it by id. CUPS retains finished jobs for `PreserveJobHistory`
+    /// (a minute by default, often much longer), which is ample for the applet
+    /// to read the outcome of a job it just watched leave the queue.
+    ///
+    /// Returns `Ok(None)` when CUPS no longer knows the job, so a caller can
+    /// tell "gone" from "the daemon is unreachable" and stay silent rather than
+    /// guess at an outcome.
+    pub async fn job(&self, printer: &str, id: JobId) -> Result<Option<Job>> {
+        let request = self.job_request(printer, id)?;
+
+        let resp = self
+            .inner
+            .send(request)
+            .await
+            .map_err(|e| Error::Transport(e.to_string()))?;
+
+        // A job aged out of the history is a normal outcome, not a failure.
+        if resp.header().status_code() == StatusCode::ClientErrorNotFound {
+            return Ok(None);
+        }
+        Self::check_status(&resp, "Get-Job-Attributes")?;
+
+        Ok(Self::decode_jobs(&resp).into_iter().next())
     }
 }
 
@@ -527,6 +566,60 @@ mod tests {
         let client = CupsClient::local().unwrap();
         let jobs = client.jobs(WhichJobs::NotCompleted).await.unwrap();
         assert!(jobs.iter().all(|j| j.state.is_active()));
+    }
+
+    #[test]
+    fn the_job_request_asks_for_every_attribute_the_decoder_needs() {
+        let client = CupsClient::with_uri("http://localhost:631", "tester").unwrap();
+        let request = client.job_request("HP-8210", 42).unwrap();
+
+        assert_eq!(
+            request.header().operation_or_status,
+            Operation::GetJobAttributes as i16
+        );
+
+        let group = request
+            .attributes()
+            .first_of(DelimiterTag::OperationAttributes)
+            .unwrap();
+        let attrs = crate::attrs::Attrs::new(group);
+
+        assert_eq!(attrs.int("job-id"), Some(42));
+        assert!(
+            attrs
+                .text("printer-uri")
+                .unwrap()
+                .ends_with("/printers/HP-8210")
+        );
+
+        let requested = attrs.texts("requested-attributes");
+        // job-state is the whole point: it is how a finished job's outcome is read.
+        for needed in ["job-id", "job-state", "job-name", "job-printer-uri"] {
+            assert!(requested.contains(&needed.to_string()), "missing {needed}");
+        }
+        // The two requests must agree, or a job would decode differently
+        // depending on which call produced it.
+        let listed = {
+            let listing = client.jobs_request(WhichJobs::NotCompleted).unwrap();
+            let group = listing
+                .attributes()
+                .first_of(DelimiterTag::OperationAttributes)
+                .unwrap();
+            crate::attrs::Attrs::new(group).texts("requested-attributes")
+        };
+        assert_eq!(requested, listed);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a running cupsd"]
+    async fn a_job_id_the_daemon_never_heard_of_is_none_not_an_error() {
+        let client = CupsClient::local().unwrap();
+        // CUPS numbers jobs from 1 upwards; this id will not exist.
+        let job = client
+            .job("HP-OfficeJet-Pro-8210", 2_000_000_000)
+            .await
+            .expect("a missing job is not a transport failure");
+        assert!(job.is_none());
     }
 
     #[test]
