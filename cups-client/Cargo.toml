@@ -9,7 +9,8 @@ ipp.workspace = true
 futures.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-tokio.workspace = true
+tokio = { version = "1.49", default-features = false, features = ["time"] }
 async-stream = "0.3"
 
 [dev-dependencies]
+tokio = { version = "1.49", default-features = false, features = ["macros", "rt"] }

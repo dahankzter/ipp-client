@@ -9,6 +9,9 @@ pub enum PrinterEvent {
     JobChanged(Job),
     JobRemoved(JobId),
     PrinterChanged(Printer),
+    /// A queue CUPS no longer knows about, by name. Without this a deleted
+    /// queue would sit in the panel forever, permanently idle.
+    PrinterRemoved(String),
     /// A full state reload. Emitted on connect and after any recovery, so the
     /// consumer always has a way back to a known-good state.
     Resynchronised { printers: Vec<Printer>, jobs: Vec<Job> },
@@ -40,6 +43,12 @@ impl Snapshot {
                     events.push(PrinterEvent::JobChanged(job.clone()))
                 }
                 Some(_) => {}
+            }
+        }
+
+        for printer in &self.printers {
+            if !next.printers.iter().any(|p| p.name == printer.name) {
+                events.push(PrinterEvent::PrinterRemoved(printer.name.clone()));
             }
         }
 
@@ -151,6 +160,30 @@ mod tests {
         let before = snapshot(vec![], vec![]);
         let after = snapshot(vec![printer(PrinterState::Idle)], vec![]);
         assert_eq!(before.diff(&after).len(), 1);
+    }
+
+    #[test]
+    fn a_vanished_printer_is_reported_as_removed() {
+        let before = snapshot(vec![printer(PrinterState::Idle)], vec![]);
+        let after = snapshot(vec![], vec![]);
+        assert_eq!(
+            before.diff(&after),
+            vec![PrinterEvent::PrinterRemoved("HP-8210".into())]
+        );
+    }
+
+    #[test]
+    fn a_replaced_printer_reports_removal_before_addition() {
+        let mut other = printer(PrinterState::Idle);
+        other.name = "Other".into();
+
+        let before = snapshot(vec![printer(PrinterState::Idle)], vec![]);
+        let after = snapshot(vec![other], vec![]);
+        let events = before.diff(&after);
+
+        assert_eq!(events.len(), 2);
+        assert!(matches!(&events[0], PrinterEvent::PrinterRemoved(n) if n == "HP-8210"));
+        assert!(matches!(&events[1], PrinterEvent::PrinterChanged(p) if p.name == "Other"));
     }
 
     #[test]
