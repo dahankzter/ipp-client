@@ -6,7 +6,7 @@ use ipp::{
 };
 use tracing::warn;
 
-use crate::{Error, Job, Printer, Result, lpoptions};
+use crate::{Error, Job, JobId, Printer, Result, lpoptions};
 
 const LOCAL_CUPS: &str = "http://localhost:631";
 
@@ -283,6 +283,68 @@ impl WhichJobs {
     }
 }
 
+impl CupsClient {
+    /// Builds a `Cancel-Job` / `Hold-Job` / `Release-Job` request.
+    pub(crate) fn job_action_request(
+        &self,
+        operation: Operation,
+        printer: &str,
+        id: JobId,
+    ) -> Result<IppRequestResponse> {
+        let uri = self.printer_uri(printer)?;
+        let mut request = IppRequestResponse::new(IppVersion::v1_1(), operation, Some(uri))
+            .map_err(|e| Error::Transport(e.to_string()))?;
+
+        for (name, value) in [
+            ("job-id", IppValue::Integer(id)),
+            (
+                "requesting-user-name",
+                IppValue::NameWithoutLanguage(
+                    self.user
+                        .as_str()
+                        .try_into()
+                        .map_err(|_| Error::decode("requesting-user-name", "name too long"))?,
+                ),
+            ),
+        ] {
+            request.attributes_mut().add(
+                DelimiterTag::OperationAttributes,
+                IppAttribute::with_name(name, value)
+                    .map_err(|e| Error::decode(name, e.to_string()))?,
+            );
+        }
+
+        Ok(request)
+    }
+
+    async fn job_action(
+        &self,
+        operation: Operation,
+        label: &str,
+        printer: &str,
+        id: JobId,
+    ) -> Result<()> {
+        let request = self.job_action_request(operation, printer, id)?;
+        self.send(request, label).await?;
+        Ok(())
+    }
+
+    /// Cancels one of the current user's jobs.
+    pub async fn cancel_job(&self, printer: &str, id: JobId) -> Result<()> {
+        self.job_action(Operation::CancelJob, "Cancel-Job", printer, id).await
+    }
+
+    /// Holds one of the current user's jobs.
+    pub async fn hold_job(&self, printer: &str, id: JobId) -> Result<()> {
+        self.job_action(Operation::HoldJob, "Hold-Job", printer, id).await
+    }
+
+    /// Releases one of the current user's held jobs.
+    pub async fn release_job(&self, printer: &str, id: JobId) -> Result<()> {
+        self.job_action(Operation::ReleaseJob, "Release-Job", printer, id).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -380,5 +442,33 @@ mod tests {
         let client = CupsClient::local().unwrap();
         let jobs = client.jobs(WhichJobs::NotCompleted).await.unwrap();
         assert!(jobs.iter().all(|j| j.state.is_active()));
+    }
+
+    #[test]
+    fn job_action_request_carries_id_user_and_operation() {
+        let client = CupsClient::with_uri("http://localhost:631", "tester").unwrap();
+        let request = client
+            .job_action_request(Operation::HoldJob, "HP-8210", 42)
+            .unwrap();
+
+        assert_eq!(request.header().operation_or_status, Operation::HoldJob as i16);
+
+        let group = request
+            .attributes()
+            .first_of(DelimiterTag::OperationAttributes)
+            .unwrap();
+        let attrs = crate::attrs::Attrs::new(group);
+        assert_eq!(attrs.int("job-id"), Some(42));
+        assert_eq!(attrs.text("requesting-user-name").as_deref(), Some("tester"));
+        assert!(attrs.text("printer-uri").unwrap().ends_with("/printers/HP-8210"));
+    }
+
+    #[test]
+    fn release_uses_its_own_operation_code() {
+        let client = CupsClient::with_uri("http://localhost:631", "tester").unwrap();
+        let request = client
+            .job_action_request(Operation::ReleaseJob, "HP-8210", 7)
+            .unwrap();
+        assert_eq!(request.header().operation_or_status, Operation::ReleaseJob as i16);
     }
 }
