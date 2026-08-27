@@ -189,6 +189,73 @@ impl Printer {
     }
 }
 
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobProgress {
+    /// CUPS did not report a page count. Render an indeterminate bar.
+    Indeterminate,
+    Pages { done: i32, total: i32 },
+}
+
+impl JobProgress {
+    /// Completion in 0.0..=1.0, or `None` when indeterminate.
+    pub fn fraction(&self) -> Option<f32> {
+        match self {
+            JobProgress::Indeterminate => None,
+            JobProgress::Pages { done, total } if *total > 0 => {
+                Some((*done as f32 / *total as f32).clamp(0.0, 1.0))
+            }
+            JobProgress::Pages { .. } => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Job {
+    pub id: JobId,
+    pub printer: String,
+    pub name: Option<String>,
+    pub user: Option<String>,
+    pub state: JobState,
+    pub reasons: Vec<StateReason>,
+    pub progress: JobProgress,
+    pub created: Option<SystemTime>,
+}
+
+/// Extracts the CUPS queue name from a printer URI.
+pub fn printer_name_from_uri(uri: &str) -> Option<String> {
+    uri.rsplit('/').next().filter(|s| !s.is_empty()).map(str::to_string)
+}
+
+impl Job {
+    pub fn decode(group: &IppAttributeGroup) -> Result<Job> {
+        let a = Attrs::new(group);
+
+        let progress = match (a.int("job-impressions"), a.int("job-impressions-completed")) {
+            (Some(total), Some(done)) if total > 0 => JobProgress::Pages { done, total },
+            _ => JobProgress::Indeterminate,
+        };
+
+        Ok(Job {
+            id: a.require_int("job-id")?,
+            printer: a
+                .text("job-printer-uri")
+                .and_then(|uri| printer_name_from_uri(&uri))
+                .unwrap_or_default(),
+            name: a.text("job-name"),
+            user: a.text("job-originating-user-name"),
+            state: JobState::from_ipp(a.require_int("job-state")?)?,
+            reasons: StateReason::parse_list(&a.texts("job-state-reasons")),
+            progress,
+            created: a
+                .int("time-at-creation")
+                .filter(|t| *t > 0)
+                .map(|t| UNIX_EPOCH + Duration::from_secs(t as u64)),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,6 +336,73 @@ mod tests {
 
         let quiet = Printer::decode(&printer_group(vec![])).unwrap();
         assert_eq!(quiet.highest_severity(), None);
+    }
+
+    fn job_group(extra: Vec<(&str, IppValue)>) -> IppAttributeGroup {
+        let mut g = IppAttributeGroup::new(DelimiterTag::JobAttributes);
+        let mut base = vec![
+            ("job-id", IppValue::Integer(42)),
+            ("job-state", IppValue::Enum(5)),
+            (
+                "job-printer-uri",
+                IppValue::Uri("ipp://localhost:631/printers/HP-8210".try_into().unwrap()),
+            ),
+        ];
+        base.extend(extra);
+        for (name, value) in base {
+            g.attributes_mut().push(IppAttribute::with_name(name, value).unwrap());
+        }
+        g
+    }
+
+    #[test]
+    fn decodes_a_minimal_job() {
+        let j = Job::decode(&job_group(vec![])).unwrap();
+        assert_eq!(j.id, 42);
+        assert_eq!(j.state, JobState::Processing);
+        assert_eq!(j.printer, "HP-8210");
+        assert_eq!(j.name, None);
+        assert_eq!(j.progress, JobProgress::Indeterminate);
+    }
+
+    #[test]
+    fn absent_impressions_means_indeterminate_not_zero() {
+        let j = Job::decode(&job_group(vec![(
+            "job-impressions-completed",
+            IppValue::Integer(3),
+        )]))
+        .unwrap();
+        assert_eq!(j.progress, JobProgress::Indeterminate);
+    }
+
+    #[test]
+    fn both_impression_counts_give_page_progress() {
+        let j = Job::decode(&job_group(vec![
+            ("job-impressions", IppValue::Integer(10)),
+            ("job-impressions-completed", IppValue::Integer(3)),
+        ]))
+        .unwrap();
+        assert_eq!(j.progress, JobProgress::Pages { done: 3, total: 10 });
+        assert_eq!(j.progress.fraction(), Some(0.3));
+    }
+
+    #[test]
+    fn zero_total_impressions_is_indeterminate() {
+        let j = Job::decode(&job_group(vec![
+            ("job-impressions", IppValue::Integer(0)),
+            ("job-impressions-completed", IppValue::Integer(0)),
+        ]))
+        .unwrap();
+        assert_eq!(j.progress, JobProgress::Indeterminate);
+    }
+
+    #[test]
+    fn printer_name_is_the_last_uri_segment() {
+        assert_eq!(
+            printer_name_from_uri("ipp://localhost:631/printers/HP-8210").as_deref(),
+            Some("HP-8210")
+        );
+        assert_eq!(printer_name_from_uri("").as_deref(), None);
     }
 
     #[test]
