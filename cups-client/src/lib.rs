@@ -6,4 +6,4 @@ mod error;
 mod model;
 
 pub use error::{Error, Result};
-pub use model::{JobId, JobState, PrinterState, Severity, StateReason};
+pub use model::{JobId, JobState, PrinterState, Severity, StateReason, Supply, SupplyLevel};

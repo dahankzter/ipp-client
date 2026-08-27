@@ -95,6 +95,55 @@ impl StateReason {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SupplyLevel {
+    /// A percentage in 0..=100.
+    Percent(u8),
+    /// CUPS reports a negative level when it does not know.
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Supply {
+    pub name: String,
+    pub kind: Option<String>,
+    pub colour: Option<String>,
+    pub level: SupplyLevel,
+    pub low_threshold: Option<i32>,
+}
+
+impl Supply {
+    pub fn decode_list(
+        names: &[String],
+        levels: &[i32],
+        types: &[String],
+        colours: &[String],
+        low: &[i32],
+    ) -> Result<Vec<Supply>> {
+        if names.len() != levels.len() {
+            return Err(Error::decode(
+                "marker-levels",
+                format!("{} levels for {} names", levels.len(), names.len()),
+            ));
+        }
+
+        Ok(names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| Supply {
+                name: name.clone(),
+                kind: types.get(i).cloned(),
+                colour: colours.get(i).cloned(),
+                level: match levels[i] {
+                    n if n < 0 => SupplyLevel::Unknown,
+                    n => SupplyLevel::Percent(n.min(100) as u8),
+                },
+                low_threshold: low.get(i).copied(),
+            })
+            .collect())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,5 +203,56 @@ mod tests {
     fn none_keyword_yields_no_reasons() {
         let list = vec!["none".to_string()];
         assert!(StateReason::parse_list(&list).is_empty());
+    }
+
+    fn s(v: &[&str]) -> Vec<String> {
+        v.iter().map(|x| x.to_string()).collect()
+    }
+
+    #[test]
+    fn supplies_pair_names_with_levels() {
+        let supplies = Supply::decode_list(
+            &s(&["Black Ink", "Cyan Ink"]),
+            &[80, 5],
+            &s(&["ink-cartridge", "ink-cartridge"]),
+            &s(&["#000000", "#00FFFF"]),
+            &[10, 10],
+        )
+        .unwrap();
+
+        assert_eq!(supplies.len(), 2);
+        assert_eq!(supplies[0].name, "Black Ink");
+        assert_eq!(supplies[0].level, SupplyLevel::Percent(80));
+        assert_eq!(supplies[0].colour.as_deref(), Some("#000000"));
+        assert_eq!(supplies[1].level, SupplyLevel::Percent(5));
+        assert_eq!(supplies[1].low_threshold, Some(10));
+    }
+
+    #[test]
+    fn negative_level_is_unknown_not_zero() {
+        let supplies =
+            Supply::decode_list(&s(&["Drum"]), &[-1], &[], &[], &[]).unwrap();
+        assert_eq!(supplies[0].level, SupplyLevel::Unknown);
+        assert_eq!(supplies[0].kind, None);
+        assert_eq!(supplies[0].colour, None);
+        assert_eq!(supplies[0].low_threshold, None);
+    }
+
+    #[test]
+    fn level_above_100_is_clamped() {
+        let supplies =
+            Supply::decode_list(&s(&["Weird"]), &[150], &[], &[], &[]).unwrap();
+        assert_eq!(supplies[0].level, SupplyLevel::Percent(100));
+    }
+
+    #[test]
+    fn mismatched_names_and_levels_is_a_decode_error() {
+        let err = Supply::decode_list(&s(&["A", "B"]), &[50], &[], &[], &[]).unwrap_err();
+        assert!(err.to_string().contains("marker-levels"));
+    }
+
+    #[test]
+    fn no_markers_yields_no_supplies() {
+        assert!(Supply::decode_list(&[], &[], &[], &[], &[]).unwrap().is_empty());
     }
 }
