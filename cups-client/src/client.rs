@@ -13,8 +13,6 @@ const LOCAL_CUPS: &str = "http://localhost:631";
 /// Async client for a CUPS daemon.
 pub struct CupsClient {
     inner: AsyncIppClient,
-    /// Used only for the raw subscription requests `ipp` cannot express.
-    http: reqwest::Client,
     base: String,
     user: String,
 }
@@ -33,7 +31,6 @@ impl CupsClient {
 
         Ok(CupsClient {
             inner: AsyncIppClient::new(parsed),
-            http: reqwest::Client::new(),
             base: uri.trim_end_matches('/').to_string(),
             user: user.to_string(),
         })
