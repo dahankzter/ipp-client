@@ -14,7 +14,10 @@ pub enum PrinterEvent {
     PrinterRemoved(String),
     /// A full state reload. Emitted on connect and after any recovery, so the
     /// consumer always has a way back to a known-good state.
-    Resynchronised { printers: Vec<Printer>, jobs: Vec<Job> },
+    Resynchronised {
+        printers: Vec<Printer>,
+        jobs: Vec<Job>,
+    },
 }
 
 /// A point-in-time view of the print system.
@@ -117,7 +120,10 @@ mod tests {
 
     #[test]
     fn identical_snapshots_produce_no_events() {
-        let s = snapshot(vec![printer(PrinterState::Idle)], vec![job(1, JobState::Pending)]);
+        let s = snapshot(
+            vec![printer(PrinterState::Idle)],
+            vec![job(1, JobState::Pending)],
+        );
         assert!(s.diff(&s).is_empty());
     }
 
@@ -136,7 +142,9 @@ mod tests {
         let after = snapshot(vec![], vec![job(1, JobState::Processing)]);
         let events = before.diff(&after);
         assert_eq!(events.len(), 1);
-        assert!(matches!(&events[0], PrinterEvent::JobChanged(j) if j.state == JobState::Processing));
+        assert!(
+            matches!(&events[0], PrinterEvent::JobChanged(j) if j.state == JobState::Processing)
+        );
     }
 
     #[test]
@@ -152,7 +160,9 @@ mod tests {
         let after = snapshot(vec![printer(PrinterState::Processing)], vec![]);
         let events = before.diff(&after);
         assert_eq!(events.len(), 1);
-        assert!(matches!(&events[0], PrinterEvent::PrinterChanged(p) if p.state == PrinterState::Processing));
+        assert!(
+            matches!(&events[0], PrinterEvent::PrinterChanged(p) if p.state == PrinterState::Processing)
+        );
     }
 
     #[test]
@@ -199,9 +209,18 @@ mod tests {
     #[test]
     fn backoff_grows_then_caps() {
         assert_eq!(backoff_after(Duration::ZERO), Duration::from_secs(1));
-        assert_eq!(backoff_after(Duration::from_secs(1)), Duration::from_secs(2));
-        assert_eq!(backoff_after(Duration::from_secs(16)), Duration::from_secs(30));
-        assert_eq!(backoff_after(Duration::from_secs(30)), Duration::from_secs(30));
+        assert_eq!(
+            backoff_after(Duration::from_secs(1)),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            backoff_after(Duration::from_secs(16)),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            backoff_after(Duration::from_secs(30)),
+            Duration::from_secs(30)
+        );
     }
 
     #[test]

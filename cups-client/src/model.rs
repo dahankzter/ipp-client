@@ -18,7 +18,10 @@ impl PrinterState {
             3 => Ok(PrinterState::Idle),
             4 => Ok(PrinterState::Processing),
             5 => Ok(PrinterState::Stopped),
-            other => Err(Error::decode("printer-state", format!("unknown value {other}"))),
+            other => Err(Error::decode(
+                "printer-state",
+                format!("unknown value {other}"),
+            )),
         }
     }
 }
@@ -81,10 +84,16 @@ impl StateReason {
             ("-report", Severity::Report),
         ] {
             if let Some(keyword) = raw.strip_suffix(suffix) {
-                return StateReason { keyword: keyword.to_string(), severity };
+                return StateReason {
+                    keyword: keyword.to_string(),
+                    severity,
+                };
             }
         }
-        StateReason { keyword: raw.to_string(), severity: Severity::Report }
+        StateReason {
+            keyword: raw.to_string(),
+            severity: Severity::Report,
+        }
     }
 
     /// Parses a `*-state-reasons` list. The `none` keyword means "no reasons".
@@ -178,7 +187,11 @@ impl Printer {
             // `ipp` returns an `Array` (not a scalar) when cupsd advertises more
             // than one URI (e.g. both ipp and ipps), and `Attrs::text` reads
             // only scalars. Take the first of the possibly-many values instead.
-            uri: a.texts("printer-uri-supported").into_iter().next().unwrap_or_default(),
+            uri: a
+                .texts("printer-uri-supported")
+                .into_iter()
+                .next()
+                .unwrap_or_default(),
             info: a.text("printer-info"),
             location: a.text("printer-location"),
             state: PrinterState::from_ipp(a.require_int("printer-state")?)?,
@@ -207,7 +220,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub enum JobProgress {
     /// CUPS did not report a page count. Render an indeterminate bar.
     Indeterminate,
-    Pages { done: i32, total: i32 },
+    Pages {
+        done: i32,
+        total: i32,
+    },
 }
 
 impl JobProgress {
@@ -237,7 +253,10 @@ pub struct Job {
 
 /// Extracts the CUPS queue name from a printer URI.
 pub fn printer_name_from_uri(uri: &str) -> Option<String> {
-    uri.rsplit('/').next().filter(|s| !s.is_empty()).map(str::to_string)
+    uri.rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 impl Job {
@@ -273,19 +292,26 @@ mod tests {
     use super::*;
     use ipp::prelude::*;
     // Re-import our types to shadow the conflicting ipp ones
-    use super::{PrinterState, JobState, Severity, StateReason, SupplyLevel, Supply};
+    use super::{JobState, PrinterState, Severity, StateReason, Supply, SupplyLevel};
 
     fn printer_group(extra: Vec<(&str, IppValue)>) -> IppAttributeGroup {
         let mut g = IppAttributeGroup::new(DelimiterTag::PrinterAttributes);
         let mut base = vec![
-            ("printer-name", IppValue::NameWithoutLanguage("HP-8210".try_into().unwrap())),
-            ("printer-uri-supported", IppValue::Uri("ipp://localhost/printers/HP-8210".try_into().unwrap())),
+            (
+                "printer-name",
+                IppValue::NameWithoutLanguage("HP-8210".try_into().unwrap()),
+            ),
+            (
+                "printer-uri-supported",
+                IppValue::Uri("ipp://localhost/printers/HP-8210".try_into().unwrap()),
+            ),
             ("printer-state", IppValue::Enum(3)),
             ("printer-is-accepting-jobs", IppValue::Boolean(true)),
         ];
         base.extend(extra);
         for (name, value) in base {
-            g.attributes_mut().push(IppAttribute::with_name(name, value).unwrap());
+            g.attributes_mut()
+                .push(IppAttribute::with_name(name, value).unwrap());
         }
         g
     }
@@ -312,9 +338,15 @@ mod tests {
                     IppValue::Keyword("media-jam-error".try_into().unwrap()),
                 ]),
             ),
-            ("marker-names", IppValue::NameWithoutLanguage("Black Ink".try_into().unwrap())),
+            (
+                "marker-names",
+                IppValue::NameWithoutLanguage("Black Ink".try_into().unwrap()),
+            ),
             ("marker-levels", IppValue::Integer(42)),
-            ("printer-info", IppValue::TextWithoutLanguage("Office printer".try_into().unwrap())),
+            (
+                "printer-info",
+                IppValue::TextWithoutLanguage("Office printer".try_into().unwrap()),
+            ),
         ]))
         .unwrap();
 
@@ -362,7 +394,8 @@ mod tests {
         ];
         base.extend(extra);
         for (name, value) in base {
-            g.attributes_mut().push(IppAttribute::with_name(name, value).unwrap());
+            g.attributes_mut()
+                .push(IppAttribute::with_name(name, value).unwrap());
         }
         g
     }
@@ -533,7 +566,10 @@ mod tests {
         // will actually see it.
         let mut g = IppAttributeGroup::new(DelimiterTag::PrinterAttributes);
         for (name, value) in [
-            ("printer-name", IppValue::NameWithoutLanguage("HP-8210".try_into().unwrap())),
+            (
+                "printer-name",
+                IppValue::NameWithoutLanguage("HP-8210".try_into().unwrap()),
+            ),
             (
                 "printer-uri-supported",
                 IppValue::Array(vec![
@@ -544,7 +580,8 @@ mod tests {
             ("printer-state", IppValue::Enum(3)),
             ("printer-is-accepting-jobs", IppValue::Boolean(true)),
         ] {
-            g.attributes_mut().push(IppAttribute::with_name(name, value).unwrap());
+            g.attributes_mut()
+                .push(IppAttribute::with_name(name, value).unwrap());
         }
 
         let p = Printer::decode(&g).unwrap();

@@ -403,17 +403,20 @@ impl CupsClient {
 
     /// Cancels one of the current user's jobs.
     pub async fn cancel_job(&self, printer: &str, id: JobId) -> Result<()> {
-        self.job_action(Operation::CancelJob, "Cancel-Job", printer, id).await
+        self.job_action(Operation::CancelJob, "Cancel-Job", printer, id)
+            .await
     }
 
     /// Holds one of the current user's jobs.
     pub async fn hold_job(&self, printer: &str, id: JobId) -> Result<()> {
-        self.job_action(Operation::HoldJob, "Hold-Job", printer, id).await
+        self.job_action(Operation::HoldJob, "Hold-Job", printer, id)
+            .await
     }
 
     /// Releases one of the current user's held jobs.
     pub async fn release_job(&self, printer: &str, id: JobId) -> Result<()> {
-        self.job_action(Operation::ReleaseJob, "Release-Job", printer, id).await
+        self.job_action(Operation::ReleaseJob, "Release-Job", printer, id)
+            .await
     }
 }
 
@@ -431,8 +434,7 @@ impl CupsClient {
         let parsed: Uri = uri
             .parse()
             .map_err(|e| Error::Transport(format!("bad printer uri {uri}: {e}")))?;
-        let op = GetPrinterAttributes::new(parsed)
-            .map_err(|e| Error::Transport(e.to_string()))?;
+        let op = GetPrinterAttributes::new(parsed).map_err(|e| Error::Transport(e.to_string()))?;
         let resp = self.send(op, "Get-Printer-Attributes").await?;
 
         resp.attributes()
@@ -532,9 +534,15 @@ mod tests {
     #[test]
     fn decodes_every_printer_in_a_real_response() {
         let printers = CupsClient::decode_printers(&fixture(), None);
-        assert!(!printers.is_empty(), "fixture should contain at least one printer");
+        assert!(
+            !printers.is_empty(),
+            "fixture should contain at least one printer"
+        );
         assert!(printers.iter().all(|p| !p.name.is_empty()));
-        assert!(printers.iter().all(|p| !p.is_default), "no default was supplied");
+        assert!(
+            printers.iter().all(|p| !p.is_default),
+            "no default was supplied"
+        );
     }
 
     #[test]
@@ -697,7 +705,10 @@ mod tests {
             .job_action_request(Operation::HoldJob, "HP-8210", 42)
             .unwrap();
 
-        assert_eq!(request.header().operation_or_status, Operation::HoldJob as i16);
+        assert_eq!(
+            request.header().operation_or_status,
+            Operation::HoldJob as i16
+        );
 
         let group = request
             .attributes()
@@ -705,8 +716,16 @@ mod tests {
             .unwrap();
         let attrs = crate::attrs::Attrs::new(group);
         assert_eq!(attrs.int("job-id"), Some(42));
-        assert_eq!(attrs.text("requesting-user-name").as_deref(), Some("tester"));
-        assert!(attrs.text("printer-uri").unwrap().ends_with("/printers/HP-8210"));
+        assert_eq!(
+            attrs.text("requesting-user-name").as_deref(),
+            Some("tester")
+        );
+        assert!(
+            attrs
+                .text("printer-uri")
+                .unwrap()
+                .ends_with("/printers/HP-8210")
+        );
     }
 
     #[test]
@@ -715,6 +734,9 @@ mod tests {
         let request = client
             .job_action_request(Operation::ReleaseJob, "HP-8210", 7)
             .unwrap();
-        assert_eq!(request.header().operation_or_status, Operation::ReleaseJob as i16);
+        assert_eq!(
+            request.header().operation_or_status,
+            Operation::ReleaseJob as i16
+        );
     }
 }

@@ -97,7 +97,10 @@ mod tests {
     #[test]
     fn reads_single_text_and_int_values() {
         let g = group(vec![
-            ("printer-name", IppValue::NameWithoutLanguage("HP".try_into().unwrap())),
+            (
+                "printer-name",
+                IppValue::NameWithoutLanguage("HP".try_into().unwrap()),
+            ),
             ("printer-state", IppValue::Enum(3)),
         ]);
         let a = Attrs::new(&g);
@@ -116,7 +119,10 @@ mod tests {
             ]),
         )]);
         let a = Attrs::new(&g);
-        assert_eq!(a.texts("printer-state-reasons"), vec!["toner-low", "cover-open"]);
+        assert_eq!(
+            a.texts("printer-state-reasons"),
+            vec!["toner-low", "cover-open"]
+        );
     }
 
     #[test]

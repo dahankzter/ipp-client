@@ -10,7 +10,10 @@ mod lpoptions;
 mod model;
 
 pub use client::{CupsClient, WhichJobs};
-pub use events::PrinterEvent;
 pub use error::{Error, Result};
+pub use events::PrinterEvent;
 pub use lpoptions::{default_printer, default_printer_from};
-pub use model::{JobId, JobState, PrinterState, Severity, StateReason, Supply, SupplyLevel, Printer, Job, JobProgress, printer_name_from_uri};
+pub use model::{
+    Job, JobId, JobProgress, JobState, Printer, PrinterState, Severity, StateReason, Supply,
+    SupplyLevel, printer_name_from_uri,
+};

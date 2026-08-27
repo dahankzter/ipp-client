@@ -81,13 +81,27 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let user = dir.join("user");
         let system = dir.join("system");
-        write!(std::fs::File::create(&user).unwrap(), "Default UserChoice\n").unwrap();
-        write!(std::fs::File::create(&system).unwrap(), "Default SystemChoice\n").unwrap();
+        write!(
+            std::fs::File::create(&user).unwrap(),
+            "Default UserChoice\n"
+        )
+        .unwrap();
+        write!(
+            std::fs::File::create(&system).unwrap(),
+            "Default SystemChoice\n"
+        )
+        .unwrap();
 
-        assert_eq!(default_printer_from(&user, &system).as_deref(), Some("UserChoice"));
+        assert_eq!(
+            default_printer_from(&user, &system).as_deref(),
+            Some("UserChoice")
+        );
 
         std::fs::remove_file(&user).unwrap();
-        assert_eq!(default_printer_from(&user, &system).as_deref(), Some("SystemChoice"));
+        assert_eq!(
+            default_printer_from(&user, &system).as_deref(),
+            Some("SystemChoice")
+        );
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

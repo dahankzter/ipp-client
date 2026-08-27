@@ -25,7 +25,10 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 impl Error {
     pub(crate) fn decode(attribute: impl Into<String>, detail: impl Into<String>) -> Self {
-        Error::Decode { attribute: attribute.into(), detail: detail.into() }
+        Error::Decode {
+            attribute: attribute.into(),
+            detail: detail.into(),
+        }
     }
 }
 

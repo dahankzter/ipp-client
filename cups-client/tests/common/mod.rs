@@ -22,7 +22,11 @@ impl IppEvePrinter {
         // ippeveprinter needs a moment before it accepts connections.
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-        IppEvePrinter { child, port, queue: queue.to_string() }
+        IppEvePrinter {
+            child,
+            port,
+            queue: queue.to_string(),
+        }
     }
 
     /// The HTTP endpoint to POST to. `ippeveprinter` ignores the request path.
