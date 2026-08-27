@@ -144,9 +144,132 @@ impl Supply {
     }
 }
 
+use crate::attrs::Attrs;
+use ipp::prelude::IppAttributeGroup;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Printer {
+    pub name: String,
+    pub uri: String,
+    pub info: Option<String>,
+    pub location: Option<String>,
+    pub state: PrinterState,
+    pub reasons: Vec<StateReason>,
+    pub accepting_jobs: bool,
+    pub supplies: Vec<Supply>,
+    pub is_default: bool,
+}
+
+impl Printer {
+    pub fn decode(group: &IppAttributeGroup) -> Result<Printer> {
+        let a = Attrs::new(group);
+
+        Ok(Printer {
+            name: a.require_text("printer-name")?,
+            uri: a.text("printer-uri-supported").unwrap_or_default(),
+            info: a.text("printer-info"),
+            location: a.text("printer-location"),
+            state: PrinterState::from_ipp(a.require_int("printer-state")?)?,
+            reasons: StateReason::parse_list(&a.texts("printer-state-reasons")),
+            accepting_jobs: a.bool("printer-is-accepting-jobs").unwrap_or(true),
+            supplies: Supply::decode_list(
+                &a.texts("marker-names"),
+                &a.ints("marker-levels"),
+                &a.texts("marker-types"),
+                &a.texts("marker-colors"),
+                &a.ints("marker-low-levels"),
+            )?,
+            is_default: false,
+        })
+    }
+
+    /// The worst severity among the current state reasons, if any.
+    pub fn highest_severity(&self) -> Option<Severity> {
+        self.reasons.iter().map(|r| r.severity).max()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ipp::prelude::*;
+    // Re-import our types to shadow the conflicting ipp ones
+    use super::{PrinterState, JobState, Severity, StateReason, SupplyLevel, Supply};
+
+    fn printer_group(extra: Vec<(&str, IppValue)>) -> IppAttributeGroup {
+        let mut g = IppAttributeGroup::new(DelimiterTag::PrinterAttributes);
+        let mut base = vec![
+            ("printer-name", IppValue::NameWithoutLanguage("HP-8210".try_into().unwrap())),
+            ("printer-uri-supported", IppValue::Uri("ipp://localhost/printers/HP-8210".try_into().unwrap())),
+            ("printer-state", IppValue::Enum(3)),
+            ("printer-is-accepting-jobs", IppValue::Boolean(true)),
+        ];
+        base.extend(extra);
+        for (name, value) in base {
+            g.attributes_mut().push(IppAttribute::with_name(name, value).unwrap());
+        }
+        g
+    }
+
+    #[test]
+    fn decodes_a_minimal_printer() {
+        let p = Printer::decode(&printer_group(vec![])).unwrap();
+        assert_eq!(p.name, "HP-8210");
+        assert_eq!(p.state, PrinterState::Idle);
+        assert!(p.accepting_jobs);
+        assert!(p.reasons.is_empty());
+        assert!(p.supplies.is_empty());
+        assert_eq!(p.info, None);
+        assert!(!p.is_default);
+    }
+
+    #[test]
+    fn decodes_reasons_and_supplies() {
+        let p = Printer::decode(&printer_group(vec![
+            (
+                "printer-state-reasons",
+                IppValue::Array(vec![
+                    IppValue::Keyword("toner-low-warning".try_into().unwrap()),
+                    IppValue::Keyword("media-jam-error".try_into().unwrap()),
+                ]),
+            ),
+            ("marker-names", IppValue::NameWithoutLanguage("Black Ink".try_into().unwrap())),
+            ("marker-levels", IppValue::Integer(42)),
+            ("printer-info", IppValue::TextWithoutLanguage("Office printer".try_into().unwrap())),
+        ]))
+        .unwrap();
+
+        assert_eq!(p.reasons.len(), 2);
+        assert_eq!(p.reasons[1].severity, Severity::Error);
+        assert_eq!(p.supplies.len(), 1);
+        assert_eq!(p.supplies[0].level, SupplyLevel::Percent(42));
+        assert_eq!(p.info.as_deref(), Some("Office printer"));
+    }
+
+    #[test]
+    fn missing_printer_name_is_a_decode_error() {
+        let mut g = IppAttributeGroup::new(DelimiterTag::PrinterAttributes);
+        g.attributes_mut()
+            .push(IppAttribute::with_name("printer-state", IppValue::Enum(3)).unwrap());
+        let err = Printer::decode(&g).unwrap_err();
+        assert!(err.to_string().contains("printer-name"));
+    }
+
+    #[test]
+    fn highest_severity_reports_the_worst_reason() {
+        let p = Printer::decode(&printer_group(vec![(
+            "printer-state-reasons",
+            IppValue::Array(vec![
+                IppValue::Keyword("cover-open-report".try_into().unwrap()),
+                IppValue::Keyword("media-empty-warning".try_into().unwrap()),
+            ]),
+        )]))
+        .unwrap();
+        assert_eq!(p.highest_severity(), Some(Severity::Warning));
+
+        let quiet = Printer::decode(&printer_group(vec![])).unwrap();
+        assert_eq!(quiet.highest_severity(), None);
+    }
 
     #[test]
     fn printer_state_maps_known_values() {
