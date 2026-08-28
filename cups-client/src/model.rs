@@ -180,6 +180,140 @@ pub struct Printer {
     pub accepting_jobs: bool,
     pub supplies: Vec<Supply>,
     pub is_default: bool,
+    /// Job option defaults the queue advertises.
+    pub options: PrinterOptions,
+}
+
+/// Print quality, from the IPP `print-quality` enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrintQuality {
+    Draft,
+    Normal,
+    High,
+}
+
+impl PrintQuality {
+    /// `None` outside the registered set, so an unexpected value is dropped
+    /// rather than silently reported as some other quality.
+    pub fn from_ipp(value: i32) -> Option<Self> {
+        match value {
+            3 => Some(PrintQuality::Draft),
+            4 => Some(PrintQuality::Normal),
+            5 => Some(PrintQuality::High),
+            _ => None,
+        }
+    }
+
+    pub fn to_ipp(self) -> i32 {
+        match self {
+            PrintQuality::Draft => 3,
+            PrintQuality::Normal => 4,
+            PrintQuality::High => 5,
+        }
+    }
+}
+
+/// What a queue advertises for one option, and the value currently set.
+///
+/// An option the queue says nothing about is empty rather than an error: not
+/// every printer offers every option.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OptionValues<T> {
+    pub supported: Vec<T>,
+    pub default: Option<T>,
+}
+
+impl<T> Default for OptionValues<T> {
+    fn default() -> Self {
+        OptionValues { supported: Vec::new(), default: None }
+    }
+}
+
+impl<T> OptionValues<T> {
+    /// Whether this is worth offering. One value is not a choice, and a
+    /// control that can only be set to what it already says is noise.
+    pub fn is_choice(&self) -> bool {
+        self.supported.len() >= 2
+    }
+}
+
+/// The job options a queue advertises defaults for.
+///
+/// Deliberately the five in the panel design rather than everything a PPD can
+/// express: rendering an arbitrary option tree well is its own project.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PrinterOptions {
+    pub media: OptionValues<String>,
+    pub sides: OptionValues<String>,
+    pub color_mode: OptionValues<String>,
+    pub quality: OptionValues<PrintQuality>,
+    pub output_bin: OptionValues<String>,
+}
+
+impl PrinterOptions {
+    fn decode(a: &Attrs) -> PrinterOptions {
+        PrinterOptions {
+            media: OptionValues {
+                supported: a.texts("media-supported"),
+                default: a.text("media-default"),
+            },
+            sides: OptionValues {
+                supported: a.texts("sides-supported"),
+                default: a.text("sides-default"),
+            },
+            color_mode: OptionValues {
+                supported: a.texts("print-color-mode-supported"),
+                default: a.text("print-color-mode-default"),
+            },
+            quality: OptionValues {
+                supported: a
+                    .ints("print-quality-supported")
+                    .into_iter()
+                    .filter_map(PrintQuality::from_ipp)
+                    .collect(),
+                default: a.int("print-quality-default").and_then(PrintQuality::from_ipp),
+            },
+            output_bin: OptionValues {
+                supported: a.texts("output-bin-supported"),
+                default: a.text("output-bin-default"),
+            },
+        }
+    }
+}
+
+/// A media size named with the PWG self-describing scheme, as in
+/// `iso_a4_210x297mm` - `class_name_dimensions`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaSize {
+    /// The original keyword, which is what CUPS wants set back.
+    pub keyword: String,
+    pub class: String,
+    pub name: String,
+    /// The dimension suffix, e.g. `210x297mm`.
+    ///
+    /// A size and its borderless twin always share this, while the name part
+    /// varies by vendor - `a4` against `a-4`, `hagaki` against `postcard` - so
+    /// this is the only reliable way to pair them.
+    pub dimensions: String,
+    pub borderless: bool,
+}
+
+impl MediaSize {
+    /// `None` for anything not shaped like a PWG name.
+    pub fn parse(keyword: &str) -> Option<MediaSize> {
+        let (head, dimensions) = keyword.rsplit_once('_')?;
+        let (class, name) = head.split_once('_')?;
+        if class.is_empty() || name.is_empty() || dimensions.is_empty() {
+            return None;
+        }
+        Some(MediaSize {
+            keyword: keyword.to_string(),
+            class: class.to_string(),
+            name: name.to_string(),
+            dimensions: dimensions.to_string(),
+            borderless: name.contains(".borderless"),
+        })
+    }
 }
 
 impl Printer {
@@ -210,6 +344,7 @@ impl Printer {
                 &a.ints("marker-low-levels"),
             ),
             is_default: false,
+            options: PrinterOptions::decode(&a),
         })
     }
 
@@ -297,7 +432,10 @@ mod tests {
     use super::*;
     use ipp::prelude::*;
     // Re-import our types to shadow the conflicting ipp ones
-    use super::{JobState, PrinterState, Severity, StateReason, Supply, SupplyLevel};
+    use super::{
+        JobState, MediaSize, OptionValues, PrintQuality, PrinterState, Severity, StateReason,
+        Supply, SupplyLevel,
+    };
 
     fn printer_group(extra: Vec<(&str, IppValue)>) -> IppAttributeGroup {
         let mut g = IppAttributeGroup::new(DelimiterTag::PrinterAttributes);
@@ -319,6 +457,127 @@ mod tests {
                 .push(IppAttribute::with_name(name, value).unwrap());
         }
         g
+    }
+
+    fn kw(v: &str) -> IppValue {
+        IppValue::Keyword(v.try_into().unwrap())
+    }
+
+    #[test]
+    fn print_quality_maps_the_ipp_enums() {
+        assert_eq!(PrintQuality::from_ipp(3), Some(PrintQuality::Draft));
+        assert_eq!(PrintQuality::from_ipp(4), Some(PrintQuality::Normal));
+        assert_eq!(PrintQuality::from_ipp(5), Some(PrintQuality::High));
+        // Unknown values are dropped rather than guessed at.
+        assert_eq!(PrintQuality::from_ipp(9), None);
+    }
+
+    #[test]
+    fn options_decode_supported_values_and_the_current_default() {
+        let p = Printer::decode(&printer_group(vec![
+            (
+                "media-supported",
+                IppValue::Array(vec![kw("iso_a4_210x297mm"), kw("na_letter_8.5x11in")]),
+            ),
+            ("media-default", kw("iso_a4_210x297mm")),
+            ("print-quality-supported", IppValue::Array(vec![
+                IppValue::Enum(3),
+                IppValue::Enum(4),
+            ])),
+            ("print-quality-default", IppValue::Enum(4)),
+        ]))
+        .unwrap();
+
+        assert_eq!(p.options.media.supported.len(), 2);
+        assert_eq!(p.options.media.default.as_deref(), Some("iso_a4_210x297mm"));
+        assert_eq!(
+            p.options.quality.supported,
+            vec![PrintQuality::Draft, PrintQuality::Normal]
+        );
+        assert_eq!(p.options.quality.default, Some(PrintQuality::Normal));
+    }
+
+    #[test]
+    fn an_option_the_queue_does_not_advertise_is_empty_not_an_error() {
+        // A queue that offers no choice of output bin simply says nothing.
+        let p = Printer::decode(&printer_group(vec![])).unwrap();
+        assert!(p.options.output_bin.supported.is_empty());
+        assert_eq!(p.options.output_bin.default, None);
+    }
+
+    #[test]
+    fn a_scalar_supported_value_reads_as_one_choice() {
+        // Measured against cupsd: output-bin-supported comes back as a bare
+        // keyword, not a 1setOf, when the printer has exactly one bin.
+        let p = Printer::decode(&printer_group(vec![
+            ("output-bin-supported", kw("face-up")),
+            ("output-bin-default", kw("face-up")),
+        ]))
+        .unwrap();
+        assert_eq!(p.options.output_bin.supported, vec!["face-up".to_string()]);
+        assert!(!p.options.output_bin.is_choice());
+    }
+
+    #[test]
+    fn an_option_is_a_choice_only_with_two_or_more_values() {
+        let one = OptionValues { supported: vec!["face-up".to_string()], default: None };
+        let two = OptionValues {
+            supported: vec!["one-sided".to_string(), "two-sided-long-edge".to_string()],
+            default: None,
+        };
+        assert!(!one.is_choice());
+        assert!(two.is_choice());
+    }
+
+    #[test]
+    fn media_names_parse_into_class_dimensions_and_borderless() {
+        let a4 = MediaSize::parse("iso_a4_210x297mm").unwrap();
+        assert_eq!(a4.class, "iso");
+        assert_eq!(a4.dimensions, "210x297mm");
+        assert!(!a4.borderless);
+
+        let bl = MediaSize::parse("om_a-4.borderless_210x297mm").unwrap();
+        assert!(bl.borderless);
+        assert_eq!(bl.dimensions, "210x297mm");
+    }
+
+    #[test]
+    fn a_size_and_its_borderless_twin_share_dimensions() {
+        // Vendors vary the name part - a4 vs a-4, hagaki vs postcard - so the
+        // dimension suffix is the only reliable way to pair the two.
+        for (plain, borderless) in [
+            ("iso_a4_210x297mm", "om_a-4.borderless_210x297mm"),
+            ("na_letter_8.5x11in", "oe_letter.borderless_8.5x11in"),
+            ("jpn_hagaki_100x148mm", "om_postcard.borderless_100x148mm"),
+        ] {
+            let a = MediaSize::parse(plain).unwrap();
+            let b = MediaSize::parse(borderless).unwrap();
+            assert_eq!(a.dimensions, b.dimensions, "{plain} vs {borderless}");
+            assert!(!a.borderless && b.borderless);
+        }
+    }
+
+    #[test]
+    fn the_two_16k_sizes_are_not_confused() {
+        // Same vendor name, different sizes: pairing on the name would merge
+        // them, pairing on dimensions keeps them apart.
+        let small = MediaSize::parse("om_16k_184x260mm").unwrap();
+        let large = MediaSize::parse("om_16k_195x270mm").unwrap();
+        assert_ne!(small.dimensions, large.dimensions);
+    }
+
+    #[test]
+    fn custom_range_markers_are_identifiable() {
+        // custom_min/custom_max describe the range a printer accepts, they are
+        // not sizes anyone can pick.
+        assert_eq!(MediaSize::parse("custom_min_3x5in").unwrap().class, "custom");
+        assert_eq!(MediaSize::parse("custom_max_8.5x14in").unwrap().class, "custom");
+    }
+
+    #[test]
+    fn a_name_without_the_pwg_shape_is_rejected() {
+        assert!(MediaSize::parse("A4").is_none());
+        assert!(MediaSize::parse("").is_none());
     }
 
     #[test]

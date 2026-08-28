@@ -112,6 +112,7 @@ mod tests {
             accepting_jobs: true,
             supplies: Vec::new(),
             is_default: true,
+            options: Default::default(),
         }
     }
 
