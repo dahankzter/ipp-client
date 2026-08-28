@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+use std::time::Duration;
+
 use crate::{
+    device::{Device, decode_devices},
     error::{CupsPkError, Result, translate},
     proxy::MechanismProxy,
 };
@@ -81,5 +84,23 @@ impl CupsPk {
             .await
             .map_err(Self::call_failed)?;
         translate(error)
+    }
+}
+
+impl CupsPk {
+    /// Discovers connected and network printers.
+    ///
+    /// `timeout` bounds how long CUPS scans; a few seconds is typical. The
+    /// mechanism gates this behind its `devices-get` polkit action, so the
+    /// caller may be prompted.
+    pub async fn devices_get(&self, timeout: Duration, limit: u32) -> Result<Vec<Device>> {
+        let (error, raw) = self
+            .proxy
+            .devices_get(timeout.as_secs() as i32, limit as i32, Vec::new(), Vec::new())
+            .await
+            .map_err(Self::call_failed)?;
+
+        translate(error)?;
+        Ok(decode_devices(raw))
     }
 }

@@ -27,7 +27,17 @@ impl FakeMechanism {
         _include: Vec<String>,
         _exclude: Vec<String>,
     ) -> (String, HashMap<String, String>) {
-        (String::new(), HashMap::new())
+        let mut devices = HashMap::new();
+        for (k, v) in [
+            ("device-uri:0", "ipp://printer.local/ipp/print"),
+            ("device-class:0", "network"),
+            ("device-info:0", "Office Printer"),
+            ("device-uri:1", "usb://Brother/HL-2030"),
+            ("device-class:1", "direct"),
+        ] {
+            devices.insert(k.to_string(), v.to_string());
+        }
+        (String::new(), devices)
     }
 }
 
@@ -61,4 +71,19 @@ async fn a_failing_call_surfaces_the_mechanisms_message() {
 
     let err = client.printer_set_default("nope").await.unwrap_err();
     assert!(err.to_string().contains("not a valid printer name"));
+}
+
+#[tokio::test]
+async fn discovery_decodes_the_indexed_reply() {
+    let (_held, name) = serve("Devices").await;
+    let client = cups_pk_client::CupsPk::connect_to(&name).await.unwrap();
+
+    let devices = client
+        .devices_get(std::time::Duration::from_secs(5), 0)
+        .await
+        .unwrap();
+
+    assert_eq!(devices.len(), 2);
+    assert!(devices.iter().any(|d| d.is_network()));
+    assert!(devices.iter().any(|d| !d.is_network()));
 }
