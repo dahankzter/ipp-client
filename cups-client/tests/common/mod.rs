@@ -9,13 +9,26 @@ pub struct IppEvePrinter {
     child: Child,
     port: u16,
     queue: String,
+    spool: std::path::PathBuf,
 }
 
 impl IppEvePrinter {
     pub async fn start(queue: &str) -> IppEvePrinter {
         let port = free_port();
+        // Spool to a directory of its own and keep the files, so a test can
+        // check what actually arrived rather than trusting the job id.
+        let spool = std::env::temp_dir().join(format!("cups-client-ippeve-{port}"));
+        std::fs::create_dir_all(&spool).expect("can create a spool directory");
+
         let child = Command::new("ippeveprinter")
-            .args(["-p", &port.to_string(), queue])
+            .args([
+                "-p",
+                &port.to_string(),
+                "-d",
+                &spool.to_string_lossy(),
+                "-k",
+                queue,
+            ])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -28,7 +41,22 @@ impl IppEvePrinter {
             child,
             port,
             queue: queue.to_string(),
+            spool,
         }
+    }
+
+    /// The largest document the printer has spooled, in bytes.
+    ///
+    /// `ippeveprinter` writes each received document into its spool directory,
+    /// so this is what actually crossed the wire.
+    pub fn largest_spooled_document(&self) -> Option<u64> {
+        std::fs::read_dir(&self.spool)
+            .ok()?
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| entry.metadata().ok())
+            .filter(|meta| meta.is_file())
+            .map(|meta| meta.len())
+            .max()
     }
 
     /// The HTTP endpoint to POST to. `ippeveprinter` ignores the request path.
@@ -51,6 +79,7 @@ impl Drop for IppEvePrinter {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        let _ = std::fs::remove_dir_all(&self.spool);
     }
 }
 

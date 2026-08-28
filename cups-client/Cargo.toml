@@ -15,7 +15,9 @@ ipp.workspace = true
 futures.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-tokio = { version = "1.49", default-features = false, features = ["time"] }
+tokio = { version = "1.49", default-features = false, features = ["time", "fs"] }
+# Bridges tokio's AsyncRead to the futures-io one the ipp crate takes.
+tokio-util = { version = "0.7", default-features = false, features = ["compat"] }
 async-stream = "0.3"
 
 [dev-dependencies]

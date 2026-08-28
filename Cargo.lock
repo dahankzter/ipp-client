@@ -115,6 +115,7 @@ dependencies = [
  "ipp",
  "thiserror",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 

@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use ipp::{
-    operation::{GetJobAttributes, GetJobs, IppOperation, PrintJob, cups::CupsGetPrinters},
+    operation::{
+        CreateJob, GetJobAttributes, GetJobs, IppOperation, PrintJob, SendDocument,
+        cups::CupsGetPrinters,
+    },
     prelude::*,
 };
 use tracing::warn;
@@ -447,10 +450,9 @@ impl CupsClient {
     pub(crate) fn job_action_request(
         &self,
         operation: Operation,
-        printer: &str,
+        uri: Uri,
         id: JobId,
     ) -> Result<IppRequestResponse> {
-        let uri = self.printer_uri(printer)?;
         let mut request = IppRequestResponse::new(IppVersion::v1_1(), operation, Some(uri))
             .map_err(|e| Error::Transport(e.to_string()))?;
 
@@ -483,7 +485,19 @@ impl CupsClient {
         printer: &str,
         id: JobId,
     ) -> Result<()> {
-        let request = self.job_action_request(operation, printer, id)?;
+        self.job_action_at(operation, label, self.printer_uri(printer)?, id)
+            .await
+    }
+
+    /// The same, against a queue identified by URI rather than by name.
+    async fn job_action_at(
+        &self,
+        operation: Operation,
+        label: &str,
+        uri: Uri,
+        id: JobId,
+    ) -> Result<()> {
+        let request = self.job_action_request(operation, uri, id)?;
         self.send(request, label).await?;
         Ok(())
     }
@@ -655,19 +669,99 @@ impl CupsClient {
         Self::decode_job_id(&resp)
     }
 
+    /// Submits a document read from a stream, without holding it in memory.
+    ///
+    /// Uses `Create-Job` followed by `Send-Document` rather than `Print-Job`,
+    /// which is what allows the document to be streamed: `Print-Job` carries
+    /// its payload in the same request, so the whole thing has to exist before
+    /// the request can be built.
+    ///
+    /// Takes tokio's `AsyncRead` rather than the futures-io one the underlying
+    /// IPP crate wants. Every caller here is a tokio program, and making each
+    /// of them wrap their reader to satisfy a dependency's choice would be
+    /// leaking an implementation detail into the API.
+    pub async fn print_stream<R>(
+        &self,
+        printer: &str,
+        reader: R,
+        document_format: Option<&str>,
+        job_name: &str,
+    ) -> Result<JobId>
+    where
+        R: tokio::io::AsyncRead + Send + Unpin + 'static,
+    {
+        self.print_stream_at(
+            self.printer_uri(printer)?,
+            reader,
+            document_format,
+            job_name,
+        )
+        .await
+    }
+
+    /// The same, against a printer identified by URI rather than by queue name.
+    ///
+    /// A queue on this daemon is addressable either way, but an IPP printer
+    /// reached directly - a driverless network printer, or one on another host
+    /// - has no local queue name to give.
+    pub async fn print_stream_at<R>(
+        &self,
+        uri: Uri,
+        reader: R,
+        document_format: Option<&str>,
+        job_name: &str,
+    ) -> Result<JobId>
+    where
+        R: tokio::io::AsyncRead + Send + Unpin + 'static,
+    {
+        use tokio_util::compat::TokioAsyncReadCompatExt;
+
+        let cleanup_uri = uri.clone();
+        let create = CreateJob::new(uri.clone(), Some(job_name))
+            .map_err(|e| Error::Transport(e.to_string()))?;
+        let resp = self.send(create, "Create-Job").await?;
+        let job = Self::decode_job_id(&resp)?;
+
+        let send = SendDocument::new(
+            uri,
+            job,
+            IppPayload::new_async(reader.compat()),
+            Some(self.user.as_str()),
+            document_format,
+            true,
+        )
+        .map_err(|e| Error::Transport(e.to_string()))?;
+
+        match self.send(send, "Send-Document").await {
+            Ok(_) => Ok(job),
+            Err(e) => {
+                // Create-Job already queued a job. Left alone it would sit
+                // there indefinitely holding no document, so take it back out
+                // before reporting the failure.
+                if let Err(cleanup) = self
+                    .job_action_at(Operation::CancelJob, "Cancel-Job", cleanup_uri, job)
+                    .await
+                {
+                    warn!("could not cancel job {job} after Send-Document failed: {cleanup}");
+                }
+                Err(e)
+            }
+        }
+    }
+
     /// Submits a file to a queue, letting CUPS auto-type it.
     ///
     /// The file is read into memory before sending. Print jobs are typically
     /// small; a very large document would be held in memory for the duration
     /// of the request.
     pub async fn print_file(&self, printer: &str, path: &std::path::Path) -> Result<JobId> {
-        let bytes = std::fs::read(path)?;
         let job_name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "document".to_string());
 
-        self.print_bytes(printer, bytes, "application/octet-stream", &job_name)
+        let file = tokio::fs::File::open(path).await?;
+        self.print_stream(printer, file, Some("application/octet-stream"), &job_name)
             .await
     }
 }
@@ -879,7 +973,11 @@ mod tests {
     fn job_action_request_carries_id_user_and_operation() {
         let client = CupsClient::with_uri("http://localhost:631", "tester").unwrap();
         let request = client
-            .job_action_request(Operation::HoldJob, "HP-8210", 42)
+            .job_action_request(
+                Operation::HoldJob,
+                client.printer_uri("HP-8210").unwrap(),
+                42,
+            )
             .unwrap();
 
         assert_eq!(
@@ -909,7 +1007,11 @@ mod tests {
     fn release_uses_its_own_operation_code() {
         let client = CupsClient::with_uri("http://localhost:631", "tester").unwrap();
         let request = client
-            .job_action_request(Operation::ReleaseJob, "HP-8210", 7)
+            .job_action_request(
+                Operation::ReleaseJob,
+                client.printer_uri("HP-8210").unwrap(),
+                7,
+            )
             .unwrap();
         assert_eq!(
             request.header().operation_or_status,

@@ -1,0 +1,4 @@
+[profile.default]
+# A hung test should fail the run, not stall it. The live tests are the slow
+# ones - device discovery takes tens of seconds - so the bar is generous.
+slow-timeout = { period = "30s", terminate-after = 3 }
