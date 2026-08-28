@@ -169,6 +169,10 @@ use ipp::prelude::IppAttributeGroup;
 pub struct Printer {
     pub name: String,
     pub uri: String,
+    /// The backend URI CUPS prints through, e.g.
+    /// `ipps://HP%20OfficeJet._ipps._tcp.local/`. Distinct from `uri`, which is
+    /// the queue's own address on this machine. Empty when CUPS does not say.
+    pub device_uri: String,
     pub info: Option<String>,
     pub location: Option<String>,
     pub state: PrinterState,
@@ -187,6 +191,7 @@ impl Printer {
             // `ipp` returns an `Array` (not a scalar) when cupsd advertises more
             // than one URI (e.g. both ipp and ipps), and `Attrs::text` reads
             // only scalars. Take the first of the possibly-many values instead.
+            device_uri: a.text("device-uri").unwrap_or_default(),
             uri: a
                 .texts("printer-uri-supported")
                 .into_iter()

@@ -24,7 +24,10 @@ async fn the_cups_test_page_can_be_submitted() {
         .expect("a configured printer");
 
     let job = client
-        .print_file(&target.name, std::path::Path::new("/usr/share/cups/data/testprint"))
+        .print_file(
+            &target.name,
+            std::path::Path::new("/usr/share/cups/data/testprint"),
+        )
         .await
         .expect("submit the test page");
 

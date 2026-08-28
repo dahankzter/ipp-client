@@ -181,6 +181,7 @@ impl CupsClient {
     const PRINTER_ATTRIBUTES: &'static [&'static str] = &[
         "printer-name",
         "printer-uri-supported",
+        "device-uri",
         "printer-info",
         "printer-location",
         "printer-state",
