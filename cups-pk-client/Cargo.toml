@@ -1,0 +1,18 @@
+[package]
+name = "cups-pk-client"
+version = "0.1.0"
+edition.workspace = true
+license = "MIT OR Apache-2.0"
+description = "Async Rust client for the cups-pk-helper D-Bus mechanism, for CUPS administration via polkit"
+keywords = ["cups", "printing", "polkit", "dbus", "ipp"]
+categories = ["api-bindings", "os::linux-apis"]
+readme = "README.md"
+rust-version = "1.93"
+
+[dependencies]
+zbus = { version = "5.14", default-features = false, features = ["tokio"] }
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1.49", default-features = false, features = ["rt-multi-thread", "macros", "time"] }
