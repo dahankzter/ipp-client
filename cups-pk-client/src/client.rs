@@ -58,8 +58,34 @@ impl CupsPk {
     /// A front-end uses this to decide, at startup, whether to open in a
     /// read-only mode: `cups-pk-helper` is packaged nearly everywhere but is
     /// not guaranteed to be installed.
+    ///
+    /// This pings the service rather than merely constructing a proxy.
+    /// Constructing one performs no I/O and succeeds even when nothing is
+    /// listening, which would report the mechanism as present on a machine
+    /// that does not have it installed. `Ping` is part of
+    /// `org.freedesktop.DBus.Peer`, so it needs no authorisation and has no
+    /// side effects.
     pub async fn is_available() -> bool {
-        Self::connect().await.is_ok()
+        let Ok(client) = Self::connect().await else {
+            return false;
+        };
+        client.ping().await.is_ok()
+    }
+
+    /// Round-trips `org.freedesktop.DBus.Peer.Ping` against the mechanism.
+    async fn ping(&self) -> Result<()> {
+        let peer = zbus::fdo::PeerProxy::builder(self.proxy.inner().connection())
+            .destination(self.proxy.inner().destination().to_owned())
+            .map_err(|e| CupsPkError::Transport(e.to_string()))?
+            .path(self.proxy.inner().path().to_owned())
+            .map_err(|e| CupsPkError::Transport(e.to_string()))?
+            .build()
+            .await
+            .map_err(|e| CupsPkError::Transport(e.to_string()))?;
+
+        peer.ping()
+            .await
+            .map_err(|e| CupsPkError::Transport(e.to_string()))
     }
 
     /// Classifies a D-Bus-level failure.
@@ -69,7 +95,12 @@ impl CupsPk {
     /// turned into [`CupsPkError::AuthorizationFailed`].
     pub(crate) fn call_failed(e: zbus::Error) -> CupsPkError {
         let text = e.to_string();
-        if text.contains("AccessDenied") || text.contains("not authorized") {
+        // NotPrivileged is what this mechanism actually raises when polkit
+        // refuses; the generic names are kept for other D-Bus peers.
+        if text.contains("NotPrivileged")
+            || text.contains("AccessDenied")
+            || text.contains("not authorized")
+        {
             CupsPkError::AuthorizationFailed
         } else {
             CupsPkError::Transport(text)

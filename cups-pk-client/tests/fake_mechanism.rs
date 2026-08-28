@@ -85,7 +85,7 @@ async fn serve(tag: &str) -> (zbus::Connection, String) {
         .expect("a session bus is required for these tests")
         .name(name.clone())
         .unwrap()
-        .serve_at("/org/opensuse/CupsPkHelper/Mechanism", FakeMechanism)
+        .serve_at("/", FakeMechanism)
         .unwrap()
         .build()
         .await
