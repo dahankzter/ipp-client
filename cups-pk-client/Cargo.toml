@@ -6,6 +6,7 @@ license = "MIT OR Apache-2.0"
 description = "Async Rust client for the cups-pk-helper D-Bus mechanism, for CUPS administration via polkit"
 keywords = ["cups", "printing", "polkit", "dbus", "ipp"]
 categories = ["api-bindings", "os::linux-apis"]
+repository = "https://github.com/dahankzter/cosmic-printing"
 readme = "README.md"
 rust-version = "1.93"
 
