@@ -411,6 +411,19 @@ pub struct Job {
     pub reasons: Vec<StateReason>,
     pub progress: JobProgress,
     pub created: Option<SystemTime>,
+    /// Pages actually printed, when CUPS reports it.
+    ///
+    /// Separate from `progress` because a finished job keeps
+    /// `job-impressions-completed` but loses `job-impressions`, so the pair
+    /// that `progress` needs is gone while the count itself survives.
+    pub pages_printed: Option<i32>,
+    /// When the job reached a terminal state.
+    ///
+    /// Only completed jobs carry it. Note CUPS discards `job-name` and
+    /// `job-originating-user-name` once a job completes - measured against
+    /// cupsd 2.4.19 - so a finished job is identifiable by little more than
+    /// its id and this time.
+    pub completed: Option<SystemTime>,
 }
 
 /// Extracts the CUPS queue name from a printer URI.
@@ -443,6 +456,11 @@ impl Job {
             progress,
             created: a
                 .int("time-at-creation")
+                .filter(|t| *t > 0)
+                .map(|t| UNIX_EPOCH + Duration::from_secs(t as u64)),
+            pages_printed: a.int("job-impressions-completed").filter(|n| *n > 0),
+            completed: a
+                .int("time-at-completed")
                 .filter(|t| *t > 0)
                 .map(|t| UNIX_EPOCH + Duration::from_secs(t as u64)),
         })
@@ -719,6 +737,57 @@ mod tests {
                 .push(IppAttribute::with_name(name, value).unwrap());
         }
         g
+    }
+
+    #[test]
+    fn a_finished_job_keeps_its_page_count_without_a_total() {
+        // CUPS drops job-impressions once a job finishes but keeps the
+        // completed count, so progress goes indeterminate while the number of
+        // pages actually printed is still known.
+        let job = Job::decode(&job_group(vec![
+            ("job-state", IppValue::Enum(9)),
+            ("job-impressions-completed", IppValue::Integer(2)),
+        ]))
+        .unwrap();
+        assert_eq!(job.pages_printed, Some(2));
+        assert_eq!(job.progress, JobProgress::Indeterminate);
+    }
+
+    #[test]
+    fn a_job_that_printed_nothing_reports_no_page_count() {
+        let job = Job::decode(&job_group(vec![(
+            "job-impressions-completed",
+            IppValue::Integer(0),
+        )]))
+        .unwrap();
+        assert_eq!(job.pages_printed, None);
+    }
+
+    #[test]
+    fn a_completed_job_carries_its_completion_time() {
+        let job = Job::decode(&job_group(vec![
+            ("job-state", IppValue::Enum(9)),
+            ("time-at-completed", IppValue::Integer(1787935946)),
+        ]))
+        .unwrap();
+        assert_eq!(
+            job.completed,
+            Some(UNIX_EPOCH + Duration::from_secs(1787935946))
+        );
+    }
+
+    #[test]
+    fn a_job_still_running_has_no_completion_time() {
+        let job = Job::decode(&job_group(vec![])).unwrap();
+        assert_eq!(job.completed, None);
+    }
+
+    #[test]
+    fn a_zero_completion_time_reads_as_absent() {
+        // CUPS uses 0 for "not yet", which as an epoch would render as 1970.
+        let job = Job::decode(&job_group(vec![("time-at-completed", IppValue::Integer(0))]))
+            .unwrap();
+        assert_eq!(job.completed, None);
     }
 
     #[test]

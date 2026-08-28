@@ -96,7 +96,9 @@ mod tests {
             state,
             reasons: Vec::new(),
             progress: JobProgress::Indeterminate,
+            pages_printed: None,
             created: None,
+            completed: None,
         }
     }
 
