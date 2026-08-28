@@ -79,7 +79,11 @@ async fn a_device_id_narrows_the_driver_list() {
         .await
         .expect("filtered");
 
-    eprintln!("{} drivers total, {} matching the device id", all.len(), matched.len());
+    eprintln!(
+        "{} drivers total, {} matching the device id",
+        all.len(),
+        matched.len()
+    );
     assert!(
         matched.len() < all.len(),
         "the device id filter did not narrow anything: {} of {}",

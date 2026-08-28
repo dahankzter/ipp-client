@@ -225,7 +225,10 @@ pub struct OptionValues<T> {
 
 impl<T> Default for OptionValues<T> {
     fn default() -> Self {
-        OptionValues { supported: Vec::new(), default: None }
+        OptionValues {
+            supported: Vec::new(),
+            default: None,
+        }
     }
 }
 
@@ -271,7 +274,9 @@ impl PrinterOptions {
                     .into_iter()
                     .filter_map(PrintQuality::from_ipp)
                     .collect(),
-                default: a.int("print-quality-default").and_then(PrintQuality::from_ipp),
+                default: a
+                    .int("print-quality-default")
+                    .and_then(PrintQuality::from_ipp),
             },
             output_bin: OptionValues {
                 supported: a.texts("output-bin-supported"),
@@ -473,8 +478,8 @@ mod tests {
     use ipp::prelude::*;
     // Re-import our types to shadow the conflicting ipp ones
     use super::{
-        JobState, MediaSize, OptionValues, Ppd, PrintQuality, PrinterState, Severity,
-        StateReason, Supply, SupplyLevel,
+        JobState, MediaSize, OptionValues, Ppd, PrintQuality, PrinterState, Severity, StateReason,
+        Supply, SupplyLevel,
     };
 
     fn printer_group(extra: Vec<(&str, IppValue)>) -> IppAttributeGroup {
@@ -517,11 +522,17 @@ mod tests {
         let ppd = Ppd::decode(&ppd_group(vec![
             (
                 "ppd-name",
-                IppValue::NameWithoutLanguage("lsb/usr/HP/hp-officejet_pro_8210-ps.ppd.gz".try_into().unwrap()),
+                IppValue::NameWithoutLanguage(
+                    "lsb/usr/HP/hp-officejet_pro_8210-ps.ppd.gz"
+                        .try_into()
+                        .unwrap(),
+                ),
             ),
             (
                 "ppd-make-and-model",
-                IppValue::TextWithoutLanguage("HP OfficeJet Pro 8210 Postscript".try_into().unwrap()),
+                IppValue::TextWithoutLanguage(
+                    "HP OfficeJet Pro 8210 Postscript".try_into().unwrap(),
+                ),
             ),
         ]))
         .unwrap();
@@ -555,10 +566,10 @@ mod tests {
                 IppValue::Array(vec![kw("iso_a4_210x297mm"), kw("na_letter_8.5x11in")]),
             ),
             ("media-default", kw("iso_a4_210x297mm")),
-            ("print-quality-supported", IppValue::Array(vec![
-                IppValue::Enum(3),
-                IppValue::Enum(4),
-            ])),
+            (
+                "print-quality-supported",
+                IppValue::Array(vec![IppValue::Enum(3), IppValue::Enum(4)]),
+            ),
             ("print-quality-default", IppValue::Enum(4)),
         ]))
         .unwrap();
@@ -595,7 +606,10 @@ mod tests {
 
     #[test]
     fn an_option_is_a_choice_only_with_two_or_more_values() {
-        let one = OptionValues { supported: vec!["face-up".to_string()], default: None };
+        let one = OptionValues {
+            supported: vec!["face-up".to_string()],
+            default: None,
+        };
         let two = OptionValues {
             supported: vec!["one-sided".to_string(), "two-sided-long-edge".to_string()],
             default: None,
@@ -645,8 +659,14 @@ mod tests {
     fn custom_range_markers_are_identifiable() {
         // custom_min/custom_max describe the range a printer accepts, they are
         // not sizes anyone can pick.
-        assert_eq!(MediaSize::parse("custom_min_3x5in").unwrap().class, "custom");
-        assert_eq!(MediaSize::parse("custom_max_8.5x14in").unwrap().class, "custom");
+        assert_eq!(
+            MediaSize::parse("custom_min_3x5in").unwrap().class,
+            "custom"
+        );
+        assert_eq!(
+            MediaSize::parse("custom_max_8.5x14in").unwrap().class,
+            "custom"
+        );
     }
 
     #[test]
@@ -785,8 +805,11 @@ mod tests {
     #[test]
     fn a_zero_completion_time_reads_as_absent() {
         // CUPS uses 0 for "not yet", which as an epoch would render as 1970.
-        let job = Job::decode(&job_group(vec![("time-at-completed", IppValue::Integer(0))]))
-            .unwrap();
+        let job = Job::decode(&job_group(vec![(
+            "time-at-completed",
+            IppValue::Integer(0),
+        )]))
+        .unwrap();
         assert_eq!(job.completed, None);
     }
 
