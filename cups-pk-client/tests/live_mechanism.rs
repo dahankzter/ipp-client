@@ -98,7 +98,10 @@ async fn a_scratch_queue_can_be_added_and_removed() {
     let name = format!("cups-pk-client-scratch-{}", std::process::id());
     let spec = PrinterSpec::driverless(&name, &device.uri);
 
-    client.printer_add(&spec).await.expect("add the scratch queue");
+    client
+        .printer_add(&spec)
+        .await
+        .expect("add the scratch queue");
     let removed = client.printer_delete(&name).await;
 
     // Remove before asserting, so a failed assertion cannot leave the queue behind.

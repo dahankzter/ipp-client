@@ -127,7 +127,12 @@ impl CupsPk {
     pub async fn devices_get(&self, timeout: Duration, limit: u32) -> Result<Vec<Device>> {
         let (error, raw) = self
             .proxy
-            .devices_get(timeout.as_secs() as i32, limit as i32, Vec::new(), Vec::new())
+            .devices_get(
+                timeout.as_secs() as i32,
+                limit as i32,
+                Vec::new(),
+                Vec::new(),
+            )
             .await
             .map_err(Self::call_failed)?;
 

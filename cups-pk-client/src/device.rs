@@ -68,7 +68,10 @@ mod tests {
     use super::*;
 
     fn raw(pairs: &[(&str, &str)]) -> HashMap<String, String> {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 
     #[test]
@@ -136,8 +139,16 @@ mod tests {
 
     #[test]
     fn network_devices_are_distinguished_from_local_ones() {
-        let network = Device { class: "network".into(), uri: "ipp://x".into(), ..Device::default() };
-        let direct = Device { class: "direct".into(), uri: "usb://x".into(), ..Device::default() };
+        let network = Device {
+            class: "network".into(),
+            uri: "ipp://x".into(),
+            ..Device::default()
+        };
+        let direct = Device {
+            class: "direct".into(),
+            uri: "usb://x".into(),
+            ..Device::default()
+        };
         assert!(network.is_network());
         assert!(!direct.is_network());
     }

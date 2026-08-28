@@ -21,39 +21,87 @@ impl FakeMechanism {
     }
 
     async fn printer_set_enabled(&self, name: &str, _enabled: bool) -> String {
-        if name == "good" { String::new() } else { format!("\"{name}\" is not a valid printer name.") }
+        if name == "good" {
+            String::new()
+        } else {
+            format!("\"{name}\" is not a valid printer name.")
+        }
     }
 
     async fn printer_set_accept_jobs(&self, name: &str, _enabled: bool, _reason: &str) -> String {
-        if name == "good" { String::new() } else { format!("\"{name}\" is not a valid printer name.") }
+        if name == "good" {
+            String::new()
+        } else {
+            format!("\"{name}\" is not a valid printer name.")
+        }
     }
 
     async fn printer_set_info(&self, name: &str, _info: &str) -> String {
-        if name == "good" { String::new() } else { format!("\"{name}\" is not a valid printer name.") }
+        if name == "good" {
+            String::new()
+        } else {
+            format!("\"{name}\" is not a valid printer name.")
+        }
     }
 
     async fn printer_set_location(&self, name: &str, _location: &str) -> String {
-        if name == "good" { String::new() } else { format!("\"{name}\" is not a valid printer name.") }
+        if name == "good" {
+            String::new()
+        } else {
+            format!("\"{name}\" is not a valid printer name.")
+        }
     }
 
-    async fn printer_add(&self, name: &str, _uri: &str, _ppd: &str, _info: &str, _location: &str) -> String {
-        if name == "good" { String::new() } else { format!("\"{name}\" is not a valid printer name.") }
+    async fn printer_add(
+        &self,
+        name: &str,
+        _uri: &str,
+        _ppd: &str,
+        _info: &str,
+        _location: &str,
+    ) -> String {
+        if name == "good" {
+            String::new()
+        } else {
+            format!("\"{name}\" is not a valid printer name.")
+        }
     }
 
     async fn printer_delete(&self, name: &str) -> String {
-        if name == "good" { String::new() } else { format!("\"{name}\" is not a valid printer name.") }
+        if name == "good" {
+            String::new()
+        } else {
+            format!("\"{name}\" is not a valid printer name.")
+        }
     }
 
     async fn printer_rename(&self, old_name: &str, _new_name: &str) -> String {
-        if old_name == "good" { String::new() } else { format!("\"{old_name}\" is not a valid printer name.") }
+        if old_name == "good" {
+            String::new()
+        } else {
+            format!("\"{old_name}\" is not a valid printer name.")
+        }
     }
 
-    async fn printer_add_option_default(&self, name: &str, _option: &str, _values: Vec<String>) -> String {
-        if name == "good" { String::new() } else { format!("\"{name}\" is not a valid printer name.") }
+    async fn printer_add_option_default(
+        &self,
+        name: &str,
+        _option: &str,
+        _values: Vec<String>,
+    ) -> String {
+        if name == "good" {
+            String::new()
+        } else {
+            format!("\"{name}\" is not a valid printer name.")
+        }
     }
 
     async fn job_cancel_purge(&self, jobid: i32, _purge: bool) -> String {
-        if jobid > 0 { String::new() } else { format!("\"{jobid}\" is not a valid job id.") }
+        if jobid > 0 {
+            String::new()
+        } else {
+            format!("\"{jobid}\" is not a valid job id.")
+        }
     }
 
     async fn devices_get(
@@ -157,7 +205,11 @@ async fn every_remaining_method_translates_success() {
     assert!(c.printer_add(&spec).await.is_ok());
     assert!(c.printer_delete("good").await.is_ok());
     assert!(c.printer_rename("good", "better").await.is_ok());
-    assert!(c.printer_add_option_default("good", "sides", &["two-sided-long-edge".into()]).await.is_ok());
+    assert!(
+        c.printer_add_option_default("good", "sides", &["two-sided-long-edge".into()])
+            .await
+            .is_ok()
+    );
     assert!(c.job_cancel_purge(42, false).await.is_ok());
 }
 
@@ -170,6 +222,10 @@ async fn every_remaining_method_translates_failure() {
     assert!(c.printer_add(&spec).await.is_err());
     assert!(c.printer_delete("nope").await.is_err());
     assert!(c.printer_rename("nope", "x").await.is_err());
-    assert!(c.printer_add_option_default("nope", "sides", &["one-sided".into()]).await.is_err());
+    assert!(
+        c.printer_add_option_default("nope", "sides", &["one-sided".into()])
+            .await
+            .is_err()
+    );
     assert!(c.job_cancel_purge(0, false).await.is_err());
 }

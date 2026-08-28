@@ -11,10 +11,7 @@ use std::collections::HashMap;
 // The mechanism registers its object at the bus root. Its own main.c defines
 // `CPH_PATH "/"`; the conventional /org/opensuse/CupsPkHelper/Mechanism path
 // does not exist and every call against it fails with UnknownMethod.
-#[zbus::proxy(
-    interface = "org.opensuse.CupsPkHelper.Mechanism",
-    default_path = "/"
-)]
+#[zbus::proxy(interface = "org.opensuse.CupsPkHelper.Mechanism", default_path = "/")]
 pub(crate) trait Mechanism {
     async fn printer_add(
         &self,
