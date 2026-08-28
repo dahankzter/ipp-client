@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use ipp::{
-    operation::{GetJobAttributes, GetJobs, IppOperation, cups::CupsGetPrinters},
+    operation::{GetJobAttributes, GetJobs, IppOperation, PrintJob, cups::CupsGetPrinters},
     prelude::*,
 };
 use tracing::warn;
@@ -519,6 +519,49 @@ impl CupsClient {
     }
 }
 
+impl CupsClient {
+    /// Reads the job id CUPS assigned from a `Print-Job` reply.
+    pub(crate) fn decode_job_id(resp: &IppRequestResponse) -> Result<JobId> {
+        resp.attributes()
+            .groups_of(DelimiterTag::JobAttributes)
+            .next()
+            .and_then(|g| crate::attrs::Attrs::new(g).int("job-id"))
+            .ok_or_else(|| Error::decode("job-id", "absent from the Print-Job reply"))
+    }
+
+    /// Submits a file to a queue.
+    ///
+    /// The document format is left to CUPS: `application/octet-stream` makes it
+    /// auto-type the file, which handles PDF, PostScript, plain text and images
+    /// without this crate having to guess from an extension.
+    ///
+    /// Printing as yourself needs no authorisation, which is why this lives
+    /// here rather than behind the polkit mechanism.
+    ///
+    /// The file is read into memory before sending. Print jobs are typically
+    /// small; a very large document would be held in memory for the duration of
+    /// the request.
+    pub async fn print_file(&self, printer: &str, path: &std::path::Path) -> Result<JobId> {
+        let bytes = std::fs::read(path)?;
+        let job_name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "document".to_string());
+
+        let op = PrintJob::new(
+            self.printer_uri(printer)?,
+            IppPayload::new(std::io::Cursor::new(bytes)),
+            Some(self.user.as_str()),
+            Some(job_name.as_str()),
+            Some("application/octet-stream"),
+        )
+        .map_err(|e| Error::Transport(e.to_string()))?;
+
+        let resp = self.send(op, "Print-Job").await?;
+        Self::decode_job_id(&resp)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -553,6 +596,30 @@ mod tests {
         let marked = CupsClient::decode_printers(&fixture(), Some(&name));
         assert_eq!(marked.iter().filter(|p| p.is_default).count(), 1);
         assert!(marked.iter().find(|p| p.is_default).unwrap().name == name);
+    }
+
+    #[test]
+    fn a_submitted_job_reports_the_id_cups_assigned() {
+        // The caller needs the id to follow the job in the queue afterwards.
+        let mut resp =
+            IppRequestResponse::new_response(IppVersion::v1_1(), StatusCode::SuccessfulOk, 1)
+                .unwrap();
+        resp.attributes_mut().add(
+            DelimiterTag::JobAttributes,
+            IppAttribute::with_name("job-id", IppValue::Integer(42)).unwrap(),
+        );
+
+        assert_eq!(CupsClient::decode_job_id(&resp).unwrap(), 42);
+    }
+
+    #[test]
+    fn a_reply_without_a_job_id_is_a_decode_error() {
+        // Rather than inventing an id the caller would then fail to find.
+        let resp =
+            IppRequestResponse::new_response(IppVersion::v1_1(), StatusCode::SuccessfulOk, 1)
+                .unwrap();
+        let err = CupsClient::decode_job_id(&resp).unwrap_err();
+        assert!(err.to_string().contains("job-id"));
     }
 
     #[test]
