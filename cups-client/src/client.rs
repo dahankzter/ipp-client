@@ -2,7 +2,7 @@
 
 use ipp::{
     operation::{
-        CreateJob, GetJobAttributes, GetJobs, IppOperation, PrintJob, SendDocument,
+        CreateJob, GetJobAttributes, GetJobs, IppOperation, PrintJob, PurgeJobs, SendDocument,
         cups::CupsGetPrinters,
     },
     prelude::*,
@@ -11,7 +11,7 @@ use tracing::warn;
 
 use std::sync::Mutex;
 
-use crate::{Error, Job, JobId, Ppd, Printer, Result, lpoptions};
+use crate::{Class, Error, Job, JobId, Ppd, Printer, Result, lpoptions};
 
 const LOCAL_CUPS: &str = "http://localhost:631";
 
@@ -288,6 +288,37 @@ impl CupsClient {
         Ok(request)
     }
 
+    /// Lists the printer classes CUPS knows about.
+    ///
+    /// Only reading. Creating or changing a class is administrative, and this
+    /// crate deliberately holds no authenticated-admin path: that belongs to
+    /// `cups-pk-client`, where polkit does the privilege check.
+    pub async fn classes(&self) -> Result<Vec<Class>> {
+        let mut request =
+            IppRequestResponse::new(IppVersion::v1_1(), Operation::CupsGetClasses, None)
+                .map_err(|e| Error::Transport(e.to_string()))?;
+        Self::request_attributes(&mut request, &["printer-name", "member-names"])?;
+
+        let resp = self
+            .inner
+            .send(request)
+            .await
+            .map_err(|e| Error::Transport(e.to_string()))?;
+        Self::check_status(&resp, "CUPS-Get-Classes")?;
+
+        Ok(resp
+            .attributes()
+            .groups_of(DelimiterTag::PrinterAttributes)
+            .filter_map(|group| match Class::decode(group) {
+                Ok(class) => Some(class),
+                Err(e) => {
+                    tracing::debug!("skipping undecodable class: {e}");
+                    None
+                }
+            })
+            .collect())
+    }
+
     /// Lists the drivers CUPS offers, optionally narrowed by a filter.
     ///
     /// Filtering is done by cupsd, not here. Measured against the live daemon:
@@ -393,6 +424,30 @@ impl CupsClient {
         Self::check_status(&resp, "Get-Job-Attributes")?;
 
         Ok(Self::decode_jobs(&resp).into_iter().next())
+    }
+}
+
+/// IPP `Identify-Printer`, which the `ipp` crate's `Operation` enum predates.
+const IDENTIFY_PRINTER: i16 = 0x003C;
+
+/// How a printer should announce itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IdentifyAction {
+    /// Flash a light.
+    Flash,
+    /// Make a noise.
+    Sound,
+    /// Show a message on the printer's own display.
+    Display(String),
+}
+
+impl IdentifyAction {
+    fn keyword(&self) -> &'static str {
+        match self {
+            IdentifyAction::Flash => "flash",
+            IdentifyAction::Sound => "sound",
+            IdentifyAction::Display(_) => "display",
+        }
     }
 }
 
@@ -518,6 +573,209 @@ impl CupsClient {
     pub async fn release_job(&self, printer: &str, id: JobId) -> Result<()> {
         self.job_action(Operation::ReleaseJob, "Release-Job", printer, id)
             .await
+    }
+
+    /// Reprints a job that has already finished.
+    ///
+    /// Only works while CUPS still holds the document. `PreserveJobFiles` is
+    /// off by default, so a job whose files have been purged cannot be
+    /// restarted and the daemon says so.
+    pub async fn restart_job(&self, printer: &str, id: JobId) -> Result<()> {
+        self.job_action(Operation::RestartJob, "Restart-Job", printer, id)
+            .await
+    }
+
+    /// Moves a job to another queue.
+    ///
+    /// The destination is named as a queue on this daemon, since moving a job
+    /// to a printer the daemon does not know about is not a thing CUPS can do.
+    pub async fn move_job(&self, printer: &str, id: JobId, destination: &str) -> Result<()> {
+        let request = self.move_job_request(printer, id, destination)?;
+        self.send(request, "CUPS-Move-Job").await?;
+        Ok(())
+    }
+
+    /// Builds the `CUPS-Move-Job` request. Split out so its shape can be tested.
+    pub(crate) fn move_job_request(
+        &self,
+        printer: &str,
+        id: JobId,
+        destination: &str,
+    ) -> Result<IppRequestResponse> {
+        let mut request =
+            self.job_action_request(Operation::CupsMoveJob, self.printer_uri(printer)?, id)?;
+
+        // The destination goes in the job group, not the operation group: it
+        // is an attribute of the job being changed, not of the request.
+        request.attributes_mut().add(
+            DelimiterTag::JobAttributes,
+            IppAttribute::with_name(
+                "job-printer-uri",
+                IppValue::Uri(
+                    self.printer_uri(destination)?
+                        .to_string()
+                        .try_into()
+                        .map_err(|_| Error::decode("job-printer-uri", "uri too long"))?,
+                ),
+            )
+            .map_err(|e| Error::decode("job-printer-uri", e.to_string()))?,
+        );
+
+        Ok(request)
+    }
+
+    /// Removes every job from a queue, including other users' jobs.
+    ///
+    /// Needs administrative rights on the daemon. Unauthenticated callers get
+    /// a `client-error-not-authorized` back rather than a silent no-op.
+    pub async fn purge_jobs(&self, printer: &str) -> Result<()> {
+        let op = PurgeJobs::new(self.printer_uri(printer)?, Some(self.user.as_str()))
+            .map_err(|e| Error::Transport(e.to_string()))?;
+        self.send(op, "Purge-Jobs").await?;
+        Ok(())
+    }
+
+    /// Makes a printer announce itself, so it can be told apart from an
+    /// identical one on the next desk.
+    ///
+    /// Whether anything happens is up to the hardware: a printer advertises
+    /// what it can do in `identify-actions-supported`, and one that cannot do
+    /// the requested action says so rather than pretending.
+    pub async fn identify_printer(&self, printer: &str, action: IdentifyAction) -> Result<()> {
+        let request = self.identify_printer_request(self.printer_uri(printer)?, action)?;
+        self.send(request, "Identify-Printer").await?;
+        Ok(())
+    }
+
+    /// The same, against a printer identified by URI.
+    pub async fn identify_printer_at(&self, uri: Uri, action: IdentifyAction) -> Result<()> {
+        let request = self.identify_printer_request(uri, action)?;
+        self.send(request, "Identify-Printer").await?;
+        Ok(())
+    }
+
+    /// Builds the `Identify-Printer` request. Split out so its shape can be tested.
+    pub(crate) fn identify_printer_request(
+        &self,
+        uri: Uri,
+        action: IdentifyAction,
+    ) -> Result<IppRequestResponse> {
+        // The ipp crate's Operation enum predates Identify-Printer, so the
+        // opcode goes on the header directly. `header_mut` is the crate's own
+        // escape hatch for this; the placeholder operation is overwritten
+        // before the request is ever serialised.
+        let mut request = IppRequestResponse::new(
+            IppVersion::v1_1(),
+            Operation::GetPrinterAttributes,
+            Some(uri),
+        )
+        .map_err(|e| Error::Transport(e.to_string()))?;
+        request.header_mut().operation_or_status = IDENTIFY_PRINTER;
+
+        request.attributes_mut().add(
+            DelimiterTag::OperationAttributes,
+            IppAttribute::with_name(
+                "requesting-user-name",
+                IppValue::NameWithoutLanguage(
+                    self.user
+                        .as_str()
+                        .try_into()
+                        .map_err(|_| Error::decode("requesting-user-name", "name too long"))?,
+                ),
+            )
+            .map_err(|e| Error::decode("requesting-user-name", e.to_string()))?,
+        );
+
+        request.attributes_mut().add(
+            DelimiterTag::OperationAttributes,
+            IppAttribute::with_name(
+                "identify-actions",
+                IppValue::Keyword(
+                    action
+                        .keyword()
+                        .try_into()
+                        .map_err(|_| Error::decode("identify-actions", "keyword too long"))?,
+                ),
+            )
+            .map_err(|e| Error::decode("identify-actions", e.to_string()))?,
+        );
+
+        if let IdentifyAction::Display(message) = &action {
+            request.attributes_mut().add(
+                DelimiterTag::OperationAttributes,
+                IppAttribute::with_name(
+                    "message",
+                    IppValue::TextWithoutLanguage(
+                        message
+                            .as_str()
+                            .try_into()
+                            .map_err(|_| Error::decode("message", "message too long"))?,
+                    ),
+                )
+                .map_err(|e| Error::decode("message", e.to_string()))?,
+            );
+        }
+
+        Ok(request)
+    }
+
+    /// Asks whether a job with these characteristics would be accepted,
+    /// without submitting one.
+    ///
+    /// Worth doing before a long upload: it turns "the transfer failed after
+    /// two minutes" into an answer before the transfer starts.
+    pub async fn validate_job(&self, printer: &str, document_format: &str) -> Result<()> {
+        self.validate_job_at(self.printer_uri(printer)?, document_format)
+            .await
+    }
+
+    /// The same, against a printer identified by URI.
+    ///
+    /// Pairs with [`CupsClient::print_stream_at`]: ask first, then stream, so a
+    /// remote printer rejects the format before the upload rather than after.
+    pub async fn validate_job_at(&self, uri: Uri, document_format: &str) -> Result<()> {
+        let request = self.validate_job_request(uri, document_format)?;
+        self.send(request, "Validate-Job").await?;
+        Ok(())
+    }
+
+    /// Builds the `Validate-Job` request. Split out so its shape can be tested.
+    pub(crate) fn validate_job_request(
+        &self,
+        uri: Uri,
+        document_format: &str,
+    ) -> Result<IppRequestResponse> {
+        let mut request =
+            IppRequestResponse::new(IppVersion::v1_1(), Operation::ValidateJob, Some(uri))
+                .map_err(|e| Error::Transport(e.to_string()))?;
+
+        for (name, value) in [
+            (
+                "requesting-user-name",
+                IppValue::NameWithoutLanguage(
+                    self.user
+                        .as_str()
+                        .try_into()
+                        .map_err(|_| Error::decode("requesting-user-name", "name too long"))?,
+                ),
+            ),
+            (
+                "document-format",
+                IppValue::MimeMediaType(
+                    document_format
+                        .try_into()
+                        .map_err(|_| Error::decode("document-format", "value too long"))?,
+                ),
+            ),
+        ] {
+            request.attributes_mut().add(
+                DelimiterTag::OperationAttributes,
+                IppAttribute::with_name(name, value)
+                    .map_err(|e| Error::decode(name, e.to_string()))?,
+            );
+        }
+
+        Ok(request)
     }
 }
 
@@ -967,6 +1225,127 @@ mod tests {
             .await
             .expect("a missing job is not a transport failure");
         assert!(job.is_none());
+    }
+
+    #[test]
+    fn move_job_names_the_destination_in_the_job_group() {
+        let client = CupsClient::with_uri("http://localhost:631", "tester").unwrap();
+        let request = client
+            .move_job_request("HP-8210", 42, "Office-Laser")
+            .unwrap();
+
+        assert_eq!(
+            request.header().operation_or_status,
+            Operation::CupsMoveJob as i16
+        );
+
+        // The source printer and the job are operation attributes; the
+        // destination is an attribute of the job itself.
+        let operation = crate::attrs::Attrs::new(
+            request
+                .attributes()
+                .first_of(DelimiterTag::OperationAttributes)
+                .unwrap(),
+        );
+        assert_eq!(operation.int("job-id"), Some(42));
+        assert!(
+            operation
+                .text("printer-uri")
+                .unwrap()
+                .ends_with("/printers/HP-8210")
+        );
+
+        let job = crate::attrs::Attrs::new(
+            request
+                .attributes()
+                .first_of(DelimiterTag::JobAttributes)
+                .unwrap(),
+        );
+        assert!(
+            job.text("job-printer-uri")
+                .unwrap()
+                .ends_with("/printers/Office-Laser"),
+            "the destination queue is where the job is moved to"
+        );
+    }
+
+    #[test]
+    fn identify_printer_uses_the_right_opcode_not_the_placeholder() {
+        let client = CupsClient::with_uri("http://localhost:631", "tester").unwrap();
+        let request = client
+            .identify_printer_request(
+                client.printer_uri("HP-8210").unwrap(),
+                IdentifyAction::Flash,
+            )
+            .unwrap();
+
+        // Built from GetPrinterAttributes and overwritten. If the overwrite
+        // were ever dropped this would silently query attributes instead.
+        assert_eq!(request.header().operation_or_status, 0x003C);
+        assert_ne!(
+            request.header().operation_or_status,
+            Operation::GetPrinterAttributes as i16
+        );
+
+        let attrs = crate::attrs::Attrs::new(
+            request
+                .attributes()
+                .first_of(DelimiterTag::OperationAttributes)
+                .unwrap(),
+        );
+        assert_eq!(attrs.text("identify-actions").as_deref(), Some("flash"));
+        assert_eq!(attrs.text("message"), None, "flash carries no message");
+    }
+
+    #[test]
+    fn identifying_by_display_carries_the_message() {
+        let client = CupsClient::with_uri("http://localhost:631", "tester").unwrap();
+        let request = client
+            .identify_printer_request(
+                client.printer_uri("HP-8210").unwrap(),
+                IdentifyAction::Display("collect your pages".into()),
+            )
+            .unwrap();
+
+        let attrs = crate::attrs::Attrs::new(
+            request
+                .attributes()
+                .first_of(DelimiterTag::OperationAttributes)
+                .unwrap(),
+        );
+        assert_eq!(attrs.text("identify-actions").as_deref(), Some("display"));
+        assert_eq!(
+            attrs.text("message").as_deref(),
+            Some("collect your pages"),
+            "display without a message would say nothing"
+        );
+    }
+
+    #[test]
+    fn validate_job_asks_about_a_document_format() {
+        let client = CupsClient::with_uri("http://localhost:631", "tester").unwrap();
+        let request = client
+            .validate_job_request(client.printer_uri("HP-8210").unwrap(), "application/pdf")
+            .unwrap();
+
+        assert_eq!(
+            request.header().operation_or_status,
+            Operation::ValidateJob as i16
+        );
+        let attrs = crate::attrs::Attrs::new(
+            request
+                .attributes()
+                .first_of(DelimiterTag::OperationAttributes)
+                .unwrap(),
+        );
+        assert_eq!(
+            attrs.text("document-format").as_deref(),
+            Some("application/pdf")
+        );
+        assert_eq!(
+            attrs.text("requesting-user-name").as_deref(),
+            Some("tester")
+        );
     }
 
     #[test]

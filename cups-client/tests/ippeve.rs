@@ -114,3 +114,48 @@ async fn a_file_is_streamed_from_disk_rather_than_read_into_memory() {
     );
     let _ = std::fs::remove_file(&path);
 }
+
+#[tokio::test]
+#[ignore = "requires the ippeveprinter binary"]
+async fn validate_job_accepts_a_format_the_printer_supports() {
+    let printer = IppEvePrinter::start("test-queue").await;
+    let client = CupsClient::with_uri(&printer.uri(), "tester").unwrap();
+
+    // ippeveprinter serves only /ipp/print, so it is addressed by URI.
+    let uri = printer.printer_uri().parse().unwrap();
+    client
+        .validate_job_at(uri, RASTER)
+        .await
+        .expect("a format the printer renders is accepted");
+}
+
+#[tokio::test]
+#[ignore = "requires the ippeveprinter binary"]
+async fn validate_job_rejects_a_format_the_printer_cannot_render() {
+    let printer = IppEvePrinter::start("test-queue").await;
+    let client = CupsClient::with_uri(&printer.uri(), "tester").unwrap();
+    let uri = printer.printer_uri().parse().unwrap();
+
+    // This is the whole point of asking first: the rejection arrives before
+    // any document is uploaded.
+    let refused = client.validate_job_at(uri, "application/vnd.made-up").await;
+    assert!(refused.is_err(), "an unrenderable format is refused");
+}
+
+#[tokio::test]
+#[ignore = "requires the ippeveprinter binary"]
+async fn a_printer_can_be_asked_to_identify_itself() {
+    use cups_client::IdentifyAction;
+
+    let printer = IppEvePrinter::start("test-queue").await;
+    let client = CupsClient::with_uri(&printer.uri(), "tester").unwrap();
+    let uri: ipp::prelude::Uri = printer.printer_uri().parse().unwrap();
+
+    // The opcode is set by hand because the ipp crate's enum has no
+    // Identify-Printer, so this is the check that the right operation reaches
+    // the printer rather than the placeholder it was built from.
+    client
+        .identify_printer_at(uri, IdentifyAction::Sound)
+        .await
+        .expect("ippeveprinter advertises Identify-Printer and accepts it");
+}

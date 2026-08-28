@@ -93,3 +93,15 @@ async fn a_device_id_narrows_the_driver_list() {
     // Every driver must carry the name a printer-add needs.
     assert!(all.iter().all(|p| !p.name.is_empty()));
 }
+
+#[tokio::test]
+#[ignore = "requires a running cupsd"]
+async fn classes_are_listed_without_error() {
+    // Most systems have no classes configured, so this asserts the operation
+    // succeeds and decodes rather than asserting a count: an unsupported
+    // operation or a decode failure must not look like "no classes".
+    let client = CupsClient::local().unwrap();
+    let classes = client.classes().await.expect("CUPS-Get-Classes succeeds");
+    eprintln!("{} classes configured", classes.len());
+    assert!(classes.iter().all(|c| !c.name.is_empty()));
+}

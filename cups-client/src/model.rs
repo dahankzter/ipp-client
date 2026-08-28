@@ -286,6 +286,29 @@ impl PrinterOptions {
     }
 }
 
+/// A printer class: several queues addressed as one.
+///
+/// CUPS serves classes from the same URI space as printers, so a class
+/// responds to `Get-Printer-Attributes` like any queue - its state and supply
+/// levels come from [`crate::CupsClient::printer`]. What is particular to a
+/// class is which queues belong to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Class {
+    pub name: String,
+    /// The queues in this class, in the order CUPS lists them.
+    pub members: Vec<String>,
+}
+
+impl Class {
+    pub fn decode(group: &IppAttributeGroup) -> Result<Class> {
+        let a = Attrs::new(group);
+        Ok(Class {
+            name: a.require_text("printer-name")?,
+            members: a.texts("member-names"),
+        })
+    }
+}
+
 /// A driver CUPS offers, as returned by `CUPS-Get-PPDs`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ppd {
@@ -478,8 +501,8 @@ mod tests {
     use ipp::prelude::*;
     // Re-import our types to shadow the conflicting ipp ones
     use super::{
-        JobState, MediaSize, OptionValues, Ppd, PrintQuality, PrinterState, Severity, StateReason,
-        Supply, SupplyLevel,
+        Class, JobState, MediaSize, OptionValues, Ppd, PrintQuality, PrinterState, Severity,
+        StateReason, Supply, SupplyLevel,
     };
 
     fn printer_group(extra: Vec<(&str, IppValue)>) -> IppAttributeGroup {
@@ -515,6 +538,45 @@ mod tests {
                 .push(IppAttribute::with_name(name, value).unwrap());
         }
         g
+    }
+
+    #[test]
+    fn decodes_a_class_and_its_members() {
+        let mut g = IppAttributeGroup::new(DelimiterTag::PrinterAttributes);
+        for (name, value) in [
+            (
+                "printer-name",
+                IppValue::NameWithoutLanguage("Upstairs".try_into().unwrap()),
+            ),
+            (
+                "member-names",
+                IppValue::Array(vec![
+                    IppValue::NameWithoutLanguage("HP-8210".try_into().unwrap()),
+                    IppValue::NameWithoutLanguage("Office-Laser".try_into().unwrap()),
+                ]),
+            ),
+        ] {
+            g.attributes_mut()
+                .push(IppAttribute::with_name(name, value).unwrap());
+        }
+
+        let class = Class::decode(&g).unwrap();
+        assert_eq!(class.name, "Upstairs");
+        assert_eq!(class.members, vec!["HP-8210", "Office-Laser"]);
+    }
+
+    #[test]
+    fn a_class_with_no_members_is_not_an_error() {
+        // CUPS keeps a class whose printers have all been removed.
+        let mut g = IppAttributeGroup::new(DelimiterTag::PrinterAttributes);
+        g.attributes_mut().push(
+            IppAttribute::with_name(
+                "printer-name",
+                IppValue::NameWithoutLanguage("Empty".try_into().unwrap()),
+            )
+            .unwrap(),
+        );
+        assert!(Class::decode(&g).unwrap().members.is_empty());
     }
 
     #[test]
