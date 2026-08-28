@@ -281,6 +281,28 @@ impl PrinterOptions {
     }
 }
 
+/// A driver CUPS offers, as returned by `CUPS-Get-PPDs`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ppd {
+    /// The `ppd-name`, which is what a printer-add operation wants.
+    pub name: String,
+    /// CUPS' own description, e.g. `HP OfficeJet Pro 8210 Postscript`.
+    pub make_and_model: String,
+    /// The IEEE-1284 device id this driver claims to drive, if it says.
+    pub device_id: String,
+}
+
+impl Ppd {
+    pub fn decode(group: &IppAttributeGroup) -> Result<Ppd> {
+        let a = Attrs::new(group);
+        Ok(Ppd {
+            name: a.require_text("ppd-name")?,
+            make_and_model: a.text("ppd-make-and-model").unwrap_or_default(),
+            device_id: a.text("ppd-device-id").unwrap_or_default(),
+        })
+    }
+}
+
 /// A media size named with the PWG self-describing scheme, as in
 /// `iso_a4_210x297mm` - `class_name_dimensions`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -433,8 +455,8 @@ mod tests {
     use ipp::prelude::*;
     // Re-import our types to shadow the conflicting ipp ones
     use super::{
-        JobState, MediaSize, OptionValues, PrintQuality, PrinterState, Severity, StateReason,
-        Supply, SupplyLevel,
+        JobState, MediaSize, OptionValues, Ppd, PrintQuality, PrinterState, Severity,
+        StateReason, Supply, SupplyLevel,
     };
 
     fn printer_group(extra: Vec<(&str, IppValue)>) -> IppAttributeGroup {
@@ -461,6 +483,41 @@ mod tests {
 
     fn kw(v: &str) -> IppValue {
         IppValue::Keyword(v.try_into().unwrap())
+    }
+
+    fn ppd_group(extra: Vec<(&str, IppValue)>) -> IppAttributeGroup {
+        let mut g = IppAttributeGroup::new(DelimiterTag::PrinterAttributes);
+        for (name, value) in extra {
+            g.attributes_mut()
+                .push(IppAttribute::with_name(name, value).unwrap());
+        }
+        g
+    }
+
+    #[test]
+    fn decodes_a_driver() {
+        let ppd = Ppd::decode(&ppd_group(vec![
+            (
+                "ppd-name",
+                IppValue::NameWithoutLanguage("lsb/usr/HP/hp-officejet_pro_8210-ps.ppd.gz".try_into().unwrap()),
+            ),
+            (
+                "ppd-make-and-model",
+                IppValue::TextWithoutLanguage("HP OfficeJet Pro 8210 Postscript".try_into().unwrap()),
+            ),
+        ]))
+        .unwrap();
+        assert_eq!(ppd.name, "lsb/usr/HP/hp-officejet_pro_8210-ps.ppd.gz");
+        assert_eq!(ppd.make_and_model, "HP OfficeJet Pro 8210 Postscript");
+        // Not every driver declares one, and that is not an error.
+        assert!(ppd.device_id.is_empty());
+    }
+
+    #[test]
+    fn a_driver_without_a_name_is_a_decode_error() {
+        // ppd-name is the only field a caller cannot do without: it is what
+        // gets written when the printer is added.
+        assert!(Ppd::decode(&ppd_group(vec![])).is_err());
     }
 
     #[test]

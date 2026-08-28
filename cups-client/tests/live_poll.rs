@@ -58,3 +58,34 @@ async fn a_real_queue_advertises_its_job_options() {
         );
     }
 }
+
+#[tokio::test]
+#[ignore = "requires a running cupsd with drivers installed"]
+async fn a_device_id_narrows_the_driver_list() {
+    // The whole add-printer design rests on cupsd doing this filtering: an
+    // unfiltered list is ~2300 drivers, which is not choosable. Note lpinfo's
+    // --device-id flag does NOT filter, only the IPP operation does.
+    use cups_client::PpdFilter;
+
+    let client = CupsClient::local().unwrap();
+    let all = client.ppds(None).await.expect("unfiltered");
+    if all.is_empty() {
+        eprintln!("no drivers installed, nothing to compare against");
+        return;
+    }
+
+    let matched = client
+        .ppds(Some(PpdFilter::DeviceId("MFG:HP;MDL:OfficeJet Pro 8210;")))
+        .await
+        .expect("filtered");
+
+    eprintln!("{} drivers total, {} matching the device id", all.len(), matched.len());
+    assert!(
+        matched.len() < all.len(),
+        "the device id filter did not narrow anything: {} of {}",
+        matched.len(),
+        all.len()
+    );
+    // Every driver must carry the name a printer-add needs.
+    assert!(all.iter().all(|p| !p.name.is_empty()));
+}
