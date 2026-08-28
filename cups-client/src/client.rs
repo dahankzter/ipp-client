@@ -542,6 +542,38 @@ impl CupsClient {
     /// The file is read into memory before sending. Print jobs are typically
     /// small; a very large document would be held in memory for the duration of
     /// the request.
+    /// Submits already-prepared bytes to a queue.
+    ///
+    /// `document_format` is an IPP MIME type. Pass
+    /// `application/octet-stream` to let CUPS auto-type the content, or a
+    /// specific type when the caller has produced the document itself and
+    /// knows better — rendering text to PDF, for instance, so CUPS' own text
+    /// filter never runs.
+    pub async fn print_bytes(
+        &self,
+        printer: &str,
+        bytes: Vec<u8>,
+        document_format: &str,
+        job_name: &str,
+    ) -> Result<JobId> {
+        let op = PrintJob::new(
+            self.printer_uri(printer)?,
+            IppPayload::new(std::io::Cursor::new(bytes)),
+            Some(self.user.as_str()),
+            Some(job_name),
+            Some(document_format),
+        )
+        .map_err(|e| Error::Transport(e.to_string()))?;
+
+        let resp = self.send(op, "Print-Job").await?;
+        Self::decode_job_id(&resp)
+    }
+
+    /// Submits a file to a queue, letting CUPS auto-type it.
+    ///
+    /// The file is read into memory before sending. Print jobs are typically
+    /// small; a very large document would be held in memory for the duration
+    /// of the request.
     pub async fn print_file(&self, printer: &str, path: &std::path::Path) -> Result<JobId> {
         let bytes = std::fs::read(path)?;
         let job_name = path
@@ -549,17 +581,8 @@ impl CupsClient {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "document".to_string());
 
-        let op = PrintJob::new(
-            self.printer_uri(printer)?,
-            IppPayload::new(std::io::Cursor::new(bytes)),
-            Some(self.user.as_str()),
-            Some(job_name.as_str()),
-            Some("application/octet-stream"),
-        )
-        .map_err(|e| Error::Transport(e.to_string()))?;
-
-        let resp = self.send(op, "Print-Job").await?;
-        Self::decode_job_id(&resp)
+        self.print_bytes(printer, bytes, "application/octet-stream", &job_name)
+            .await
     }
 }
 
