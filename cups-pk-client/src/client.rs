@@ -155,3 +155,110 @@ impl CupsPk {
         translate(error)
     }
 }
+
+/// Everything `PrinterAdd` needs.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PrinterSpec {
+    /// The queue name. CUPS rejects names containing spaces, `/` or `#`.
+    pub name: String,
+    /// The device URI, typically one discovered by [`CupsPk::devices_get`].
+    pub uri: String,
+    /// A PPD name, or `"everywhere"` for driverless IPP.
+    pub ppd: String,
+    pub info: String,
+    pub location: String,
+}
+
+impl PrinterSpec {
+    /// A driverless printer, using CUPS' built-in IPP Everywhere support.
+    ///
+    /// This is the path worth defaulting to: any printer advertising IPP
+    /// Everywhere works with no downloaded driver at all.
+    pub fn driverless(name: impl Into<String>, uri: impl Into<String>) -> Self {
+        PrinterSpec {
+            name: name.into(),
+            uri: uri.into(),
+            ppd: "everywhere".to_string(),
+            info: String::new(),
+            location: String::new(),
+        }
+    }
+}
+
+impl CupsPk {
+    /// Adds a printer.
+    pub async fn printer_add(&self, spec: &PrinterSpec) -> Result<()> {
+        let error = self
+            .proxy
+            .printer_add(&spec.name, &spec.uri, &spec.ppd, &spec.info, &spec.location)
+            .await
+            .map_err(Self::call_failed)?;
+        translate(error)
+    }
+
+    /// Removes a printer. Its queued jobs go with it.
+    pub async fn printer_delete(&self, name: &str) -> Result<()> {
+        let error = self
+            .proxy
+            .printer_delete(name)
+            .await
+            .map_err(Self::call_failed)?;
+        translate(error)
+    }
+
+    /// Renames a printer.
+    pub async fn printer_rename(&self, from: &str, to: &str) -> Result<()> {
+        let error = self
+            .proxy
+            .printer_rename(from, to)
+            .await
+            .map_err(Self::call_failed)?;
+        translate(error)
+    }
+
+    /// Sets a default value for one of a printer's options.
+    pub async fn printer_add_option_default(
+        &self,
+        name: &str,
+        option: &str,
+        values: &[String],
+    ) -> Result<()> {
+        let error = self
+            .proxy
+            .printer_add_option_default(name, option, values.to_vec())
+            .await
+            .map_err(Self::call_failed)?;
+        translate(error)
+    }
+
+    /// Cancels a job, optionally purging its data.
+    ///
+    /// This is the authorised path, able to cancel jobs the caller does not own
+    /// via the mechanism's `job-not-owned-edit` action. `JobCancel` exists too
+    /// but is annotated `Deprecated` in the interface, so this binds
+    /// `JobCancelPurge`.
+    pub async fn job_cancel_purge(&self, job: i32, purge: bool) -> Result<()> {
+        let error = self
+            .proxy
+            .job_cancel_purge(job, purge)
+            .await
+            .map_err(Self::call_failed)?;
+        translate(error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_driverless_spec_asks_cups_for_everywhere() {
+        // "everywhere" is CUPS' name for its built-in IPP Everywhere driver,
+        // which is what makes a modern network printer work with no PPD.
+        let spec = PrinterSpec::driverless("Office", "ipp://printer.local/ipp/print");
+        assert_eq!(spec.ppd, "everywhere");
+        assert_eq!(spec.name, "Office");
+        assert_eq!(spec.uri, "ipp://printer.local/ipp/print");
+        assert_eq!(spec.info, "");
+    }
+}

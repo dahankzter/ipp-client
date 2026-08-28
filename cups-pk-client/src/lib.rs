@@ -14,6 +14,6 @@ mod device;
 mod error;
 mod proxy;
 
-pub use client::{CupsPk, MECHANISM_BUS_NAME};
+pub use client::{CupsPk, MECHANISM_BUS_NAME, PrinterSpec};
 pub use device::Device;
 pub use error::{CupsPkError, Result};

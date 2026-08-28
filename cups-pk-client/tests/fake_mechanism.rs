@@ -36,6 +36,26 @@ impl FakeMechanism {
         if name == "good" { String::new() } else { format!("\"{name}\" is not a valid printer name.") }
     }
 
+    async fn printer_add(&self, name: &str, _uri: &str, _ppd: &str, _info: &str, _location: &str) -> String {
+        if name == "good" { String::new() } else { format!("\"{name}\" is not a valid printer name.") }
+    }
+
+    async fn printer_delete(&self, name: &str) -> String {
+        if name == "good" { String::new() } else { format!("\"{name}\" is not a valid printer name.") }
+    }
+
+    async fn printer_rename(&self, old_name: &str, _new_name: &str) -> String {
+        if old_name == "good" { String::new() } else { format!("\"{old_name}\" is not a valid printer name.") }
+    }
+
+    async fn printer_add_option_default(&self, name: &str, _option: &str, _values: Vec<String>) -> String {
+        if name == "good" { String::new() } else { format!("\"{name}\" is not a valid printer name.") }
+    }
+
+    async fn job_cancel_purge(&self, jobid: i32, _purge: bool) -> String {
+        if jobid > 0 { String::new() } else { format!("\"{jobid}\" is not a valid job id.") }
+    }
+
     async fn devices_get(
         &self,
         _timeout: i32,
@@ -126,4 +146,30 @@ async fn every_state_setter_translates_failure() {
     assert!(c.printer_set_accept_jobs("nope", true, "").await.is_err());
     assert!(c.printer_set_info("nope", "x").await.is_err());
     assert!(c.printer_set_location("nope", "x").await.is_err());
+}
+
+#[tokio::test]
+async fn every_remaining_method_translates_success() {
+    let (_held, name) = serve("RestOk").await;
+    let c = cups_pk_client::CupsPk::connect_to(&name).await.unwrap();
+    let spec = cups_pk_client::PrinterSpec::driverless("good", "ipp://x/ipp/print");
+
+    assert!(c.printer_add(&spec).await.is_ok());
+    assert!(c.printer_delete("good").await.is_ok());
+    assert!(c.printer_rename("good", "better").await.is_ok());
+    assert!(c.printer_add_option_default("good", "sides", &["two-sided-long-edge".into()]).await.is_ok());
+    assert!(c.job_cancel_purge(42, false).await.is_ok());
+}
+
+#[tokio::test]
+async fn every_remaining_method_translates_failure() {
+    let (_held, name) = serve("RestErr").await;
+    let c = cups_pk_client::CupsPk::connect_to(&name).await.unwrap();
+    let spec = cups_pk_client::PrinterSpec::driverless("nope", "ipp://x/ipp/print");
+
+    assert!(c.printer_add(&spec).await.is_err());
+    assert!(c.printer_delete("nope").await.is_err());
+    assert!(c.printer_rename("nope", "x").await.is_err());
+    assert!(c.printer_add_option_default("nope", "sides", &["one-sided".into()]).await.is_err());
+    assert!(c.job_cancel_purge(0, false).await.is_err());
 }
