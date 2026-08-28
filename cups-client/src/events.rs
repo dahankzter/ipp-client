@@ -104,6 +104,7 @@ mod tests {
         Printer {
             name: "HP-8210".into(),
             uri: "ipp://localhost/printers/HP-8210".into(),
+            device_uri: String::new(),
             info: None,
             location: None,
             state,
