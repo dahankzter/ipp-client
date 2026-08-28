@@ -13,8 +13,7 @@ pub(crate) fn parse_default(contents: &str) -> Option<String> {
         .filter_map(|line| line.strip_prefix("Default "))
         .filter_map(|rest| rest.split_whitespace().next())
         .map(|dest| dest.split('/').next().unwrap_or(dest).to_string())
-        .filter(|dest| !dest.is_empty())
-        .next_back()
+        .rfind(|dest| !dest.is_empty())
 }
 
 /// Reads the default printer, preferring the user file over the system file.
@@ -81,14 +80,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let user = dir.join("user");
         let system = dir.join("system");
-        write!(
-            std::fs::File::create(&user).unwrap(),
-            "Default UserChoice\n"
-        )
-        .unwrap();
-        write!(
+        writeln!(std::fs::File::create(&user).unwrap(), "Default UserChoice").unwrap();
+        writeln!(
             std::fs::File::create(&system).unwrap(),
-            "Default SystemChoice\n"
+            "Default SystemChoice"
         )
         .unwrap();
 

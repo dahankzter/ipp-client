@@ -293,9 +293,8 @@ impl CupsClient {
     /// and `--make-and-model` flags do *not* filter - only the IPP operation
     /// does - so verify against `ipptool` rather than `lpinfo`.
     pub async fn ppds(&self, filter: Option<PpdFilter<'_>>) -> Result<Vec<Ppd>> {
-        let mut request =
-            IppRequestResponse::new(IppVersion::v1_1(), Operation::CupsGetPPDs, None)
-                .map_err(|e| Error::Transport(e.to_string()))?;
+        let mut request = IppRequestResponse::new(IppVersion::v1_1(), Operation::CupsGetPPDs, None)
+            .map_err(|e| Error::Transport(e.to_string()))?;
 
         if let Some(filter) = filter {
             let (name, value) = filter.as_attribute();

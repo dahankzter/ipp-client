@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
+// Used only by the live tests, which are #[ignore]d by default.
+#![allow(dead_code)]
 
 use std::process::{Child, Command, Stdio};
 
