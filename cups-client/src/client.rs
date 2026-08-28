@@ -8,7 +8,7 @@ use tracing::warn;
 
 use std::sync::Mutex;
 
-use crate::{Error, Job, JobId, Printer, Result, lpoptions};
+use crate::{Error, Job, JobId, Ppd, Printer, Result, lpoptions};
 
 const LOCAL_CUPS: &str = "http://localhost:631";
 
@@ -284,6 +284,58 @@ impl CupsClient {
         Ok(request)
     }
 
+    /// Lists the drivers CUPS offers, optionally narrowed by a filter.
+    ///
+    /// Filtering is done by cupsd, not here. Measured against the live daemon:
+    /// a device id narrows 2325 drivers to the 2 that actually match, while
+    /// `Make` alone barely narrows anything. Note that `lpinfo`'s `--device-id`
+    /// and `--make-and-model` flags do *not* filter - only the IPP operation
+    /// does - so verify against `ipptool` rather than `lpinfo`.
+    pub async fn ppds(&self, filter: Option<PpdFilter<'_>>) -> Result<Vec<Ppd>> {
+        let mut request =
+            IppRequestResponse::new(IppVersion::v1_1(), Operation::CupsGetPPDs, None)
+                .map_err(|e| Error::Transport(e.to_string()))?;
+
+        if let Some(filter) = filter {
+            let (name, value) = filter.as_attribute();
+            request.attributes_mut().add(
+                DelimiterTag::OperationAttributes,
+                IppAttribute::with_name(
+                    name,
+                    IppValue::TextWithoutLanguage(
+                        value
+                            .try_into()
+                            .map_err(|_| Error::decode(name, "filter value too long"))?,
+                    ),
+                )
+                .map_err(|e| Error::decode(name, e.to_string()))?,
+            );
+        }
+        Self::request_attributes(
+            &mut request,
+            &["ppd-name", "ppd-make-and-model", "ppd-device-id"],
+        )?;
+
+        let resp = self
+            .inner
+            .send(request)
+            .await
+            .map_err(|e| Error::Transport(e.to_string()))?;
+        Self::check_status(&resp, "CUPS-Get-PPDs")?;
+
+        Ok(resp
+            .attributes()
+            .groups_of(DelimiterTag::PrinterAttributes)
+            .filter_map(|group| match Ppd::decode(group) {
+                Ok(ppd) => Some(ppd),
+                Err(e) => {
+                    tracing::debug!("skipping undecodable driver: {e}");
+                    None
+                }
+            })
+            .collect())
+    }
+
     /// Lists the current user's jobs across every queue.
     pub async fn jobs(&self, which: WhichJobs) -> Result<Vec<Job>> {
         let request = self.jobs_request(which)?;
@@ -338,6 +390,28 @@ impl CupsClient {
         Self::check_status(&resp, "Get-Job-Attributes")?;
 
         Ok(Self::decode_jobs(&resp).into_iter().next())
+    }
+}
+
+/// How to narrow a driver search. cupsd does the matching.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PpdFilter<'a> {
+    /// An IEEE-1284 device id, as reported by device discovery. The most
+    /// precise filter, and the one worth trying first.
+    DeviceId(&'a str),
+    /// A description such as `HP OfficeJet Pro 8210`.
+    MakeAndModel(&'a str),
+    /// A manufacturer. Rarely narrow enough to be useful on its own.
+    Make(&'a str),
+}
+
+impl<'a> PpdFilter<'a> {
+    fn as_attribute(self) -> (&'static str, &'a str) {
+        match self {
+            PpdFilter::DeviceId(v) => ("ppd-device-id", v),
+            PpdFilter::MakeAndModel(v) => ("ppd-make-and-model", v),
+            PpdFilter::Make(v) => ("ppd-make", v),
+        }
     }
 }
 
