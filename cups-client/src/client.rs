@@ -245,6 +245,7 @@ impl CupsClient {
         "job-printer-uri",
         "job-originating-user-name",
         "time-at-creation",
+        "time-at-completed",
         "job-impressions",
         "job-impressions-completed",
     ];
