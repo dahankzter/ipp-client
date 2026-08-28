@@ -5,10 +5,14 @@ use crate::{Job, JobId, Printer};
 /// A change in the print system, emitted identically by the push and poll paths.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PrinterEvent {
-    JobAdded(Job),
-    JobChanged(Job),
+    // Boxed because an event is as large as its largest variant, and a bare
+    // Job or Printer would make every JobRemoved carry hundreds of unused
+    // bytes through the stream. Vec-carrying variants are already pointer-
+    // sized and need no boxing.
+    JobAdded(Box<Job>),
+    JobChanged(Box<Job>),
     JobRemoved(JobId),
-    PrinterChanged(Printer),
+    PrinterChanged(Box<Printer>),
     /// A queue CUPS no longer knows about, by name. Without this a deleted
     /// queue would sit in the panel forever, permanently idle.
     PrinterRemoved(String),
@@ -41,9 +45,9 @@ impl Snapshot {
 
         for job in &next.jobs {
             match self.jobs.iter().find(|j| j.id == job.id) {
-                None => events.push(PrinterEvent::JobAdded(job.clone())),
+                None => events.push(PrinterEvent::JobAdded(Box::new(job.clone()))),
                 Some(previous) if previous != job => {
-                    events.push(PrinterEvent::JobChanged(job.clone()))
+                    events.push(PrinterEvent::JobChanged(Box::new(job.clone())))
                 }
                 Some(_) => {}
             }
@@ -58,7 +62,7 @@ impl Snapshot {
         for printer in &next.printers {
             match self.printers.iter().find(|p| p.name == printer.name) {
                 Some(previous) if previous == printer => {}
-                _ => events.push(PrinterEvent::PrinterChanged(printer.clone())),
+                _ => events.push(PrinterEvent::PrinterChanged(Box::new(printer.clone()))),
             }
         }
 
@@ -84,6 +88,15 @@ pub(crate) fn backoff_after(previous: Duration) -> Duration {
 
 #[cfg(test)]
 mod tests {
+    /// An event is as large as its largest variant, and every event on the
+    /// stream pays that cost. Boxing the Job and Printer payloads keeps it
+    /// small; this fails if a fat payload is ever added unboxed.
+    #[test]
+    fn an_event_stays_small() {
+        let size = std::mem::size_of::<super::PrinterEvent>();
+        assert!(size <= 64, "PrinterEvent grew to {size} bytes");
+    }
+
     use super::*;
     use crate::{JobProgress, JobState, PrinterState};
 
