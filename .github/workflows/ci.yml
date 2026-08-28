@@ -1,0 +1,57 @@
+name: Continuous integration
+
+env:
+  # Stops the `debconf: unable to initialize frontend` errors.
+  DEBIAN_FRONTEND: noninteractive
+  # The live tests need a running cupsd with a real queue, so they stay
+  # #[ignore]d here and are run by hand against a real daemon.
+  CARGO_TERM_COLOR: always
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  fmt:
+    name: Rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: install toolchain
+        run: rustup show && rustup component add rustfmt
+      - name: fmt
+        run: cargo fmt --all --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-24.04
+    steps:
+      - name: install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y pkg-config
+      - uses: actions/checkout@v6
+      - name: install toolchain
+        run: rustup show && rustup component add clippy
+      - uses: Swatinem/rust-cache@v2
+      # Warnings are errors here. The tree is warning-free, and a lint that
+      # cannot fail the build does not protect anything.
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: Test
+    runs-on: ubuntu-24.04
+    steps:
+      - name: install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y pkg-config
+      - uses: actions/checkout@v6
+      - name: install toolchain
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
+      - name: test
+        run: cargo nextest run --workspace
+      # nextest does not run doctests. There are none today, and this is what
+      # stops one being added later and silently never running.
+      - name: doctests
+        run: cargo test --workspace --doc

@@ -1,0 +1,19 @@
+[workspace]
+members = ["cups-client", "cups-pk-client"]
+resolver = "3"
+
+[workspace.package]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/dahankzter/cups-client"
+edition = "2024"
+
+[workspace.dependencies]
+ipp = { version = "7.0", default-features = false, features = ["async-client"] }
+zbus = { version = "5.14", default-features = false, features = ["tokio"] }
+tokio = { version = "1.49", features = ["full"] }
+futures = "0.3"
+thiserror = "2.0"
+tracing = "0.1"
+
+[profile.release]
+lto = "thin"

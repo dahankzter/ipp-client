@@ -2,7 +2,13 @@
 name = "cups-client"
 version = "0.1.0"
 edition.workspace = true
-license = "MIT OR Apache-2.0"
+license.workspace = true
+description = "Async pure-Rust IPP client for CUPS: printers, jobs, supplies and drivers"
+keywords = ["cups", "printing", "ipp", "printer", "async"]
+categories = ["network-programming", "os::linux-apis"]
+repository.workspace = true
+readme = "README.md"
+rust-version = "1.93"
 
 [dependencies]
 ipp.workspace = true
