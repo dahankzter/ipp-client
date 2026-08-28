@@ -14,6 +14,7 @@ pub use error::{Error, Result};
 pub use events::PrinterEvent;
 pub use lpoptions::{default_printer, default_printer_from};
 pub use model::{
-    Job, JobId, JobProgress, JobState, Printer, PrinterState, Severity, StateReason, Supply,
-    SupplyLevel, printer_name_from_uri,
+    Job, JobId, JobProgress, JobState, MediaSize, OptionValues, PrintQuality, Printer,
+    PrinterOptions, PrinterState, Severity, StateReason, Supply, SupplyLevel,
+    printer_name_from_uri,
 };

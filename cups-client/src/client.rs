@@ -192,6 +192,18 @@ impl CupsClient {
         "marker-types",
         "marker-colors",
         "marker-low-levels",
+        // Job option defaults. Measured against cupsd: CUPS-Get-Printers
+        // returns all of these per queue, so no second request is needed.
+        "media-supported",
+        "media-default",
+        "sides-supported",
+        "sides-default",
+        "print-color-mode-supported",
+        "print-color-mode-default",
+        "print-quality-supported",
+        "print-quality-default",
+        "output-bin-supported",
+        "output-bin-default",
     ];
 
     /// Lists all queues known to CUPS.
