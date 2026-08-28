@@ -20,6 +20,22 @@ impl FakeMechanism {
         }
     }
 
+    async fn printer_set_enabled(&self, name: &str, _enabled: bool) -> String {
+        if name == "good" { String::new() } else { format!("\"{name}\" is not a valid printer name.") }
+    }
+
+    async fn printer_set_accept_jobs(&self, name: &str, _enabled: bool, _reason: &str) -> String {
+        if name == "good" { String::new() } else { format!("\"{name}\" is not a valid printer name.") }
+    }
+
+    async fn printer_set_info(&self, name: &str, _info: &str) -> String {
+        if name == "good" { String::new() } else { format!("\"{name}\" is not a valid printer name.") }
+    }
+
+    async fn printer_set_location(&self, name: &str, _location: &str) -> String {
+        if name == "good" { String::new() } else { format!("\"{name}\" is not a valid printer name.") }
+    }
+
     async fn devices_get(
         &self,
         _timeout: i32,
@@ -86,4 +102,28 @@ async fn discovery_decodes_the_indexed_reply() {
     assert_eq!(devices.len(), 2);
     assert!(devices.iter().any(|d| d.is_network()));
     assert!(devices.iter().any(|d| !d.is_network()));
+}
+
+#[tokio::test]
+async fn every_state_setter_translates_success() {
+    let (_held, name) = serve("StateOk").await;
+    let c = cups_pk_client::CupsPk::connect_to(&name).await.unwrap();
+
+    assert!(c.printer_set_enabled("good", true).await.is_ok());
+    assert!(c.printer_set_accept_jobs("good", true, "").await.is_ok());
+    assert!(c.printer_set_info("good", "Front desk").await.is_ok());
+    assert!(c.printer_set_location("good", "Level 2").await.is_ok());
+}
+
+#[tokio::test]
+async fn every_state_setter_translates_failure() {
+    // The convention is per-method: one forgotten translate() is a silent
+    // success on a failed operation, so each is checked individually.
+    let (_held, name) = serve("StateErr").await;
+    let c = cups_pk_client::CupsPk::connect_to(&name).await.unwrap();
+
+    assert!(c.printer_set_enabled("nope", true).await.is_err());
+    assert!(c.printer_set_accept_jobs("nope", true, "").await.is_err());
+    assert!(c.printer_set_info("nope", "x").await.is_err());
+    assert!(c.printer_set_location("nope", "x").await.is_err());
 }

@@ -104,3 +104,54 @@ impl CupsPk {
         Ok(decode_devices(raw))
     }
 }
+
+impl CupsPk {
+    /// Enables or disables a queue. A disabled queue still accepts jobs but
+    /// holds them rather than printing.
+    pub async fn printer_set_enabled(&self, name: &str, enabled: bool) -> Result<()> {
+        let error = self
+            .proxy
+            .printer_set_enabled(name, enabled)
+            .await
+            .map_err(Self::call_failed)?;
+        translate(error)
+    }
+
+    /// Sets whether a queue accepts new jobs.
+    ///
+    /// `reason` is shown by CUPS to anyone who tries to print while the queue
+    /// is rejecting; pass `""` when there is nothing useful to say.
+    pub async fn printer_set_accept_jobs(
+        &self,
+        name: &str,
+        accept: bool,
+        reason: &str,
+    ) -> Result<()> {
+        let error = self
+            .proxy
+            .printer_set_accept_jobs(name, accept, reason)
+            .await
+            .map_err(Self::call_failed)?;
+        translate(error)
+    }
+
+    /// Sets the human-readable description.
+    pub async fn printer_set_info(&self, name: &str, info: &str) -> Result<()> {
+        let error = self
+            .proxy
+            .printer_set_info(name, info)
+            .await
+            .map_err(Self::call_failed)?;
+        translate(error)
+    }
+
+    /// Sets the location string.
+    pub async fn printer_set_location(&self, name: &str, location: &str) -> Result<()> {
+        let error = self
+            .proxy
+            .printer_set_location(name, location)
+            .await
+            .map_err(Self::call_failed)?;
+        translate(error)
+    }
+}
