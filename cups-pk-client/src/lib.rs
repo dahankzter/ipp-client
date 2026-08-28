@@ -9,6 +9,9 @@
 //!
 //! [`cups-pk-helper`]: https://www.freedesktop.org/software/cups-pk-helper/releases/
 
+mod client;
 mod error;
+mod proxy;
 
+pub use client::{CupsPk, MECHANISM_BUS_NAME};
 pub use error::{CupsPkError, Result};
