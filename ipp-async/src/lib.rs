@@ -6,11 +6,17 @@
 //! that speaks it, so this talks to CUPS, to a driverless network printer
 //! directly, or to anything else implementing the standard.
 //!
+//! Most of this crate is standard IPP and works against anything. A few
+//! methods on [`IppClient`] are CUPS extensions - listing every queue on a
+//! server, its classes, its drivers, its default - because those are questions
+//! only a print server can answer. Each says so. Everything on [`IppPrinter`]
+//! is standard.
+//!
 //! # Listing what a daemon knows about
 //!
 //! ```no_run
-//! # async fn example() -> cups_client::Result<()> {
-//! let client = cups_client::CupsClient::local()?;
+//! # async fn example() -> ipp_async::Result<()> {
+//! let client = ipp_async::IppClient::local()?;
 //!
 //! for printer in client.printers().await? {
 //!     println!("{}: {:?}", printer.name, printer.state);
@@ -20,13 +26,13 @@
 //!
 //! # Working with one printer
 //!
-//! [`CupsClient::queue`] names a queue on the daemon; [`CupsClient::at`] takes
+//! [`IppClient::queue`] names a queue on the daemon; [`IppClient::at`] takes
 //! any printer's URI, with no CUPS in the path. Both give an [`IppPrinter`]
 //! carrying the same operations.
 //!
 //! ```no_run
-//! # async fn example() -> cups_client::Result<()> {
-//! let client = cups_client::CupsClient::local()?;
+//! # async fn example() -> ipp_async::Result<()> {
+//! let client = ipp_async::IppClient::local()?;
 //! let printer = client.at("ipp://printer.local/ipp/print")?;
 //!
 //! // Ask before uploading, so a rejected format costs nothing.
@@ -45,8 +51,8 @@
 //! unless the certificate is trusted explicitly:
 //!
 //! ```no_run
-//! # fn example() -> cups_client::Result<()> {
-//! let client = cups_client::CupsClient::builder("ipps://printer.local:631")
+//! # fn example() -> ipp_async::Result<()> {
+//! let client = ipp_async::IppClient::builder("ipps://printer.local:631")
 //!     .ca_cert(std::fs::read("printer.pem")?)
 //!     .build()?;
 //! # Ok(()) }
@@ -58,7 +64,7 @@
 //!
 //! Operations such as pausing a queue need authorisation, and an
 //! unauthenticated caller is refused with `401`. Either supply credentials
-//! with [`CupsClientBuilder::basic_auth`], or - on a desktop, where a password
+//! with [`IppClientBuilder::basic_auth`], or - on a desktop, where a password
 //! prompt belongs to the system rather than to your process - drive
 //! `cups-pk-helper` over D-Bus with the companion `cups-pk-client` crate, and
 //! let polkit ask.
@@ -80,7 +86,7 @@ mod events;
 mod lpoptions;
 mod model;
 
-pub use client::{CupsClient, CupsClientBuilder, IdentifyAction, IppPrinter, PpdFilter, WhichJobs};
+pub use client::{IdentifyAction, IppClient, IppClientBuilder, IppPrinter, PpdFilter, WhichJobs};
 pub use error::{Error, Result};
 pub use events::PrinterEvent;
 pub use lpoptions::{default_printer, default_printer_from};

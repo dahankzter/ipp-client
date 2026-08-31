@@ -5,7 +5,7 @@
 //! Gated twice — `#[ignore]` and `COSMIC_PRINTERS_LIVE_PRINT=1` — because this
 //! consumes paper on whatever printer is default.
 
-use cups_client::CupsClient;
+use ipp_async::IppClient;
 
 #[tokio::test]
 #[ignore = "prints a real page"]
@@ -15,7 +15,7 @@ async fn the_cups_test_page_can_be_submitted() {
         return;
     }
 
-    let client = CupsClient::local().unwrap();
+    let client = IppClient::local().unwrap();
     let printers = client.printers().await.unwrap();
     let target = printers
         .iter()
@@ -45,7 +45,7 @@ async fn several_documents_print_as_one_job() {
         return;
     }
 
-    let client = CupsClient::local().unwrap();
+    let client = IppClient::local().unwrap();
     let printers = client.printers().await.unwrap();
     let target = printers
         .iter()

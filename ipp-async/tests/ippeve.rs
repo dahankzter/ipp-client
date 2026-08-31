@@ -3,13 +3,13 @@
 mod common;
 
 use common::IppEvePrinter;
-use cups_client::CupsClient;
+use ipp_async::IppClient;
 
 #[tokio::test]
 #[ignore = "requires the ippeveprinter binary"]
 async fn get_printer_attributes_succeeds_against_a_plain_ipp_printer() {
     let printer = IppEvePrinter::start("test-queue").await;
-    let client = CupsClient::with_uri(&printer.uri(), "tester").unwrap();
+    let client = IppClient::with_uri(&printer.uri(), "tester").unwrap();
 
     let p = client.printer_at(&printer.printer_uri()).await.unwrap();
     assert!(!p.name.is_empty());
@@ -19,7 +19,7 @@ async fn get_printer_attributes_succeeds_against_a_plain_ipp_printer() {
 #[ignore = "requires the ippeveprinter binary"]
 async fn cups_get_printers_is_unsupported_on_a_plain_ipp_printer() {
     let printer = IppEvePrinter::start("test-queue").await;
-    let client = CupsClient::with_uri(&printer.uri(), "tester").unwrap();
+    let client = IppClient::with_uri(&printer.uri(), "tester").unwrap();
 
     // ippeveprinter has no CUPS extensions. This must surface as an error,
     // not a silent empty list.
@@ -35,7 +35,7 @@ const RASTER: &str = "image/pwg-raster";
 #[ignore = "requires the ippeveprinter binary"]
 async fn a_streamed_document_is_accepted() {
     let printer = IppEvePrinter::start("test-queue").await;
-    let client = CupsClient::with_uri(&printer.uri(), "tester").unwrap();
+    let client = IppClient::with_uri(&printer.uri(), "tester").unwrap();
 
     // Eight megabytes. This does not prove the document is never held whole -
     // a Cursor is in memory by construction - it proves the Create-Job then
@@ -56,7 +56,7 @@ async fn a_streamed_document_is_accepted() {
 #[ignore = "requires the ippeveprinter binary"]
 async fn a_streamed_document_reaches_the_printer_intact() {
     let printer = IppEvePrinter::start("test-queue").await;
-    let client = CupsClient::with_uri(&printer.uri(), "tester").unwrap();
+    let client = IppClient::with_uri(&printer.uri(), "tester").unwrap();
 
     let document = b"streamed through Create-Job and Send-Document".to_vec();
     let expected = document.len() as u64;
@@ -70,10 +70,8 @@ async fn a_streamed_document_reaches_the_printer_intact() {
 
     // A job id alone proves nothing: an empty document would return one too.
     // What the printer wrote to its spool is the actual evidence.
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    assert_eq!(
-        printer.largest_spooled_document(),
-        Some(expected),
+    assert!(
+        printer.await_spooled_document(expected).await,
         "the whole document reached the printer"
     );
 }
@@ -82,9 +80,10 @@ async fn a_streamed_document_reaches_the_printer_intact() {
 #[ignore = "requires the ippeveprinter binary"]
 async fn a_file_is_streamed_from_disk_rather_than_read_into_memory() {
     let printer = IppEvePrinter::start("test-queue").await;
-    let client = CupsClient::with_uri(&printer.uri(), "tester").unwrap();
+    let client = IppClient::with_uri(&printer.uri(), "tester").unwrap();
 
-    let path = std::env::temp_dir().join("cups-client-streamed-file.raster");
+    let path =
+        std::env::temp_dir().join(format!("ipp-async-streamed-{}.raster", std::process::id()));
     let contents = vec![b'r'; 3 * 1024 * 1024];
     std::fs::write(&path, &contents).unwrap();
 
@@ -99,10 +98,8 @@ async fn a_file_is_streamed_from_disk_rather_than_read_into_memory() {
         .await
         .unwrap();
 
-    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
-    assert_eq!(
-        printer.largest_spooled_document(),
-        Some(contents.len() as u64),
+    assert!(
+        printer.await_spooled_document(contents.len() as u64).await,
         "the file arrived whole"
     );
     let _ = std::fs::remove_file(&path);
@@ -112,7 +109,7 @@ async fn a_file_is_streamed_from_disk_rather_than_read_into_memory() {
 #[ignore = "requires the ippeveprinter binary"]
 async fn validate_job_accepts_a_format_the_printer_supports() {
     let printer = IppEvePrinter::start("test-queue").await;
-    let client = CupsClient::with_uri(&printer.uri(), "tester").unwrap();
+    let client = IppClient::with_uri(&printer.uri(), "tester").unwrap();
 
     // ippeveprinter serves only /ipp/print, so it is addressed by URI.
     client
@@ -127,7 +124,7 @@ async fn validate_job_accepts_a_format_the_printer_supports() {
 #[ignore = "requires the ippeveprinter binary"]
 async fn validate_job_rejects_a_format_the_printer_cannot_render() {
     let printer = IppEvePrinter::start("test-queue").await;
-    let client = CupsClient::with_uri(&printer.uri(), "tester").unwrap();
+    let client = IppClient::with_uri(&printer.uri(), "tester").unwrap();
 
     // This is the whole point of asking first: the rejection arrives before
     // any document is uploaded.
@@ -142,10 +139,10 @@ async fn validate_job_rejects_a_format_the_printer_cannot_render() {
 #[tokio::test]
 #[ignore = "requires the ippeveprinter binary"]
 async fn a_printer_can_be_asked_to_identify_itself() {
-    use cups_client::IdentifyAction;
+    use ipp_async::IdentifyAction;
 
     let printer = IppEvePrinter::start("test-queue").await;
-    let client = CupsClient::with_uri(&printer.uri(), "tester").unwrap();
+    let client = IppClient::with_uri(&printer.uri(), "tester").unwrap();
 
     // The opcode is set by hand because the ipp crate's enum has no
     // Identify-Printer, so this is the check that the right operation reaches
@@ -161,13 +158,13 @@ async fn a_printer_can_be_asked_to_identify_itself() {
 #[tokio::test]
 #[ignore = "requires the ippeveprinter binary"]
 async fn every_printer_operation_works_without_cups() {
-    use cups_client::IdentifyAction;
+    use ipp_async::IdentifyAction;
 
     // ippeveprinter is a bare IPP printer: no queues, no CUPS extensions,
     // nothing but the standard protocol. Everything on the handle has to work
     // against it, because that is the case CUPS-shaped addressing cannot reach.
     let printer = IppEvePrinter::start("test-queue").await;
-    let client = CupsClient::with_uri(&printer.uri(), "tester").unwrap();
+    let client = IppClient::with_uri(&printer.uri(), "tester").unwrap();
     let p = client.at(&printer.printer_uri()).unwrap();
 
     let attributes = p.attributes().await.expect("attributes");
@@ -197,7 +194,7 @@ async fn every_printer_operation_works_without_cups() {
 #[ignore = "requires the ippeveprinter binary"]
 async fn a_printer_without_multi_document_support_says_so() {
     let printer = IppEvePrinter::start("test-queue").await;
-    let client = CupsClient::with_uri(&printer.uri(), "tester").unwrap();
+    let client = IppClient::with_uri(&printer.uri(), "tester").unwrap();
     let p = client.at(&printer.printer_uri()).unwrap();
 
     let mut job = p.create_job("two-part").await.expect("create");
@@ -224,7 +221,7 @@ async fn a_printer_without_multi_document_support_says_so() {
 #[ignore = "requires the ippeveprinter binary"]
 async fn close_job_reaches_the_printer_as_close_job() {
     let printer = IppEvePrinter::start("test-queue").await;
-    let client = CupsClient::with_uri(&printer.uri(), "tester").unwrap();
+    let client = IppClient::with_uri(&printer.uri(), "tester").unwrap();
     let p = client.at(&printer.printer_uri()).unwrap();
 
     let mut job = p.create_job("closed-by-hand").await.expect("create");
@@ -249,10 +246,8 @@ async fn close_job_reaches_the_printer_as_close_job() {
         }
     }
 
-    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
-    assert_eq!(
-        printer.largest_spooled_document(),
-        Some(payload.len() as u64),
+    assert!(
+        printer.await_spooled_document(payload.len() as u64).await,
         "the document printed"
     );
 }

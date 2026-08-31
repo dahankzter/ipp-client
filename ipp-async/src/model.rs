@@ -217,7 +217,7 @@ pub struct Printer {
     /// The queue or printer name.
     pub name: String,
     /// The printer's own address, from `printer-uri-supported`. This is what
-    /// [`crate::CupsClient::at`] takes to address it directly.
+    /// [`crate::IppClient::at`] takes to address it directly.
     pub uri: String,
     /// The backend URI CUPS prints through, e.g.
     /// `ipps://HP%20OfficeJet._ipps._tcp.local/`. Distinct from `uri`, which is
@@ -361,7 +361,7 @@ impl PrinterOptions {
 ///
 /// CUPS serves classes from the same URI space as printers, so a class
 /// responds to `Get-Printer-Attributes` like any queue - its state and supply
-/// levels come from [`crate::CupsClient::printer`]. What is particular to a
+/// levels come from [`crate::IppClient::printer`]. What is particular to a
 /// class is which queues belong to it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Class {

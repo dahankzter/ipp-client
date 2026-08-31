@@ -1,19 +1,24 @@
-# cups-client
+# ipp-client
 
-Rust libraries for talking to CUPS.
+Rust libraries for talking to printers.
 
 | Crate | What it is |
 |---|---|
-| [`cups-client`](cups-client) | Async, pure-Rust IPP client. Printers, jobs, supplies, drivers, printing. |
+| [`ipp-async`](ipp-async) | Async, pure-Rust IPP client. Printers, jobs, supplies, drivers, printing. |
 | [`cups-pk-client`](cups-pk-client) | Async client for the `cups-pk-helper` D-Bus mechanism, for administration through polkit. |
 
-Neither links `libcups`. `cups-client` speaks IPP over HTTP directly and
+IPP is the protocol; CUPS is one server that speaks it, and so is most printing
+hardware made in the last decade. `ipp-async` therefore talks to a CUPS queue or
+straight to a printer, with nothing in between. `cups-pk-client` is
+CUPS-specific by nature and keeps its name.
+
+Neither links `libcups`. `ipp-async` speaks IPP over HTTP directly and
 `cups-pk-client` speaks D-Bus, so there is no `libcups` ABI to track, no
 bindgen, and nothing to install before building. Both are `MIT OR Apache-2.0`.
 
 ## What "no C" means here, precisely
 
-With `default-features = false`, `cups-client` builds with **no C at all**: no
+With `default-features = false`, `ipp-async` builds with **no C at all**: no
 `-sys` crate, no `cc`, no `cmake`. `libc` appears in the tree, but only as the
 syscall declarations any Rust program doing I/O uses on Linux - nothing is
 linked against a shared C library.
@@ -62,8 +67,8 @@ Not measured: any head-to-head against `libcups` bindings. That needs a harness
 neither crate has, and the numbers above suggest it would mostly measure the
 daemon.
 
-`cargo bench -p cups-client` reproduces the two benchmarks; the round trip is
-`cargo nextest run -p cups-client --run-ignored all -E 'test(round_trip_cost)'`.
+`cargo bench -p ipp-async` reproduces the two benchmarks; the round trip is
+`cargo nextest run -p ipp-async --run-ignored all -E 'test(round_trip_cost)'`.
 
 ## Tests
 

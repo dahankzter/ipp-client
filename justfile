@@ -3,7 +3,7 @@ default: test
 # Runs the unit tests. nextest does not run doctests, so they run separately.
 test:
     cargo nextest run --workspace
-    cargo nextest run -p cups-client --no-default-features
+    cargo nextest run -p ipp-async --no-default-features
     cargo test --workspace --doc
 
 # Adds the tests needing a live cupsd.

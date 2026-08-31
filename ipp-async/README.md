@@ -1,6 +1,10 @@
-# cups-client
+# ipp-async
 
-An async, pure-Rust IPP client for CUPS.
+An async, pure-Rust IPP client.
+
+IPP is what printers and print servers speak. CUPS is one server that speaks it,
+so this talks to a CUPS queue, to a driverless printer directly, or to anything
+else implementing the standard.
 
 No `libcups` and no bindgen: it speaks the IPP protocol over HTTP directly, so
 there is no C library to install and no ABI to track.

@@ -16,7 +16,7 @@ use crate::{Class, Error, Job, JobId, Ppd, Printer, Result, lpoptions};
 const LOCAL_CUPS: &str = "http://localhost:631";
 
 /// Async client for a CUPS daemon.
-pub struct CupsClient {
+pub struct IppClient {
     inner: AsyncIppClient,
     base: String,
     user: String,
@@ -28,7 +28,7 @@ pub struct CupsClient {
     default_cache: Mutex<Option<Option<String>>>,
 }
 
-impl CupsClient {
+impl IppClient {
     /// Connects to the local CUPS daemon as the current user.
     pub fn local() -> Result<Self> {
         Self::with_uri(LOCAL_CUPS, &default_user())
@@ -51,7 +51,7 @@ impl CupsClient {
 
     /// A handle to a queue on the CUPS daemon this client is connected to.
     ///
-    /// A convenience over [`CupsClient::at`] that knows CUPS' URI convention,
+    /// A convenience over [`IppClient::at`] that knows CUPS' URI convention,
     /// so a queue can be named rather than spelled out.
     pub fn queue(&self, name: &str) -> Result<IppPrinter<'_>> {
         Ok(IppPrinter {
@@ -63,28 +63,28 @@ impl CupsClient {
     /// Starts building a client with options the plain constructors do not take.
     ///
     /// ```no_run
-    /// # fn main() -> cups_client::Result<()> {
+    /// # fn main() -> ipp_async::Result<()> {
     /// // A printer's own certificate is normally self-signed, so pin it
     /// // rather than turning verification off.
-    /// let client = cups_client::CupsClient::builder("ipps://printer.local:631")
+    /// let client = ipp_async::IppClient::builder("ipps://printer.local:631")
     ///     .user("alice")
     ///     .ca_cert(std::fs::read("printer.pem")?)
     ///     .build()?;
     /// # Ok(()) }
     /// ```
-    pub fn builder(uri: &str) -> CupsClientBuilder {
-        CupsClientBuilder::new(uri)
+    pub fn builder(uri: &str) -> IppClientBuilder {
+        IppClientBuilder::new(uri)
     }
 
     /// Connects to an IPP endpoint, attributing jobs to `user`.
     ///
-    /// For TLS trust, credentials or timeouts, use [`CupsClient::builder`].
+    /// For TLS trust, credentials or timeouts, use [`IppClient::builder`].
     pub fn with_uri(uri: &str, user: &str) -> Result<Self> {
         let parsed: Uri = uri
             .parse()
             .map_err(|e| Error::transport_msg(format!("bad CUPS uri {uri}: {e}")))?;
 
-        Ok(CupsClient {
+        Ok(IppClient {
             inner: AsyncIppClient::new(parsed),
             base: uri.trim_end_matches('/').to_string(),
             user: user.to_string(),
@@ -266,6 +266,10 @@ impl CupsClient {
     ];
 
     /// Lists all queues known to CUPS.
+    ///
+    /// A CUPS extension (`CUPS-Get-Printers`), not standard IPP: a printer
+    /// reached directly knows only about itself and answers this with an
+    /// error. Use [`IppClient::at`] for one of those.
     pub async fn printers(&self) -> Result<Vec<Printer>> {
         let default = self.default_printer().await;
 
@@ -341,6 +345,8 @@ impl CupsClient {
 
     /// Lists the printer classes CUPS knows about.
     ///
+    /// A CUPS extension (`CUPS-Get-Classes`), not standard IPP.
+    ///
     /// Only reading. Creating or changing a class is administrative, and this
     /// crate deliberately holds no authenticated-admin path: that belongs to
     /// `cups-pk-client`, where polkit does the privilege check.
@@ -367,6 +373,9 @@ impl CupsClient {
     }
 
     /// Lists the drivers CUPS offers, optionally narrowed by a filter.
+    ///
+    /// A CUPS extension (`CUPS-Get-PPDs`), not standard IPP. Drivers are a
+    /// print server's concern; a printer speaks for itself.
     ///
     /// Filtering is done by cupsd, not here. Measured against the live daemon:
     /// a device id narrows 2325 drivers to the 2 that actually match, while
@@ -466,13 +475,13 @@ impl CupsClient {
 ///
 /// Every operation here is standard IPP, so the printer at the other end can
 /// be a CUPS queue, a driverless network printer, or anything else that speaks
-/// the protocol. Obtain one with [`CupsClient::at`] for an arbitrary printer,
-/// or [`CupsClient::queue`] for a queue on the CUPS daemon this client is
+/// the protocol. Obtain one with [`IppClient::at`] for an arbitrary printer,
+/// or [`IppClient::queue`] for a queue on the CUPS daemon this client is
 /// connected to.
 ///
 /// ```no_run
-/// # async fn example() -> cups_client::Result<()> {
-/// let client = cups_client::CupsClient::local()?;
+/// # async fn example() -> ipp_async::Result<()> {
+/// let client = ipp_async::IppClient::local()?;
 ///
 /// // A queue on the local daemon.
 /// let queue = client.queue("Office-Laser")?;
@@ -480,11 +489,11 @@ impl CupsClient {
 ///
 /// // A printer with no CUPS involved at all.
 /// let direct = client.at("ipp://printer.local/ipp/print")?;
-/// direct.identify(cups_client::IdentifyAction::Flash).await?;
+/// direct.identify(ipp_async::IdentifyAction::Flash).await?;
 /// # Ok(()) }
 /// ```
 pub struct IppPrinter<'a> {
-    client: &'a CupsClient,
+    client: &'a IppClient,
     uri: Uri,
 }
 
@@ -509,7 +518,7 @@ impl IppPrinter<'_> {
 
     /// Submits a document read from a stream, without holding it in memory.
     ///
-    /// See [`CupsClient::print_stream`] for why this uses `Create-Job` and
+    /// See [`IppClient::print_stream`] for why this uses `Create-Job` and
     /// `Send-Document` rather than `Print-Job`.
     pub async fn print_stream<R>(
         &self,
@@ -610,7 +619,7 @@ impl IppPrinter<'_> {
     pub async fn create_job(&self, job_name: &str) -> Result<IppJob<'_>> {
         let op = CreateJob::new(self.uri.clone(), Some(job_name)).map_err(Error::transport)?;
         let resp = self.client.send(op, "Create-Job").await?;
-        let id = CupsClient::decode_job_id(&resp)?;
+        let id = IppClient::decode_job_id(&resp)?;
 
         Ok(IppJob {
             printer: self,
@@ -728,12 +737,12 @@ impl IppJob<'_> {
     }
 }
 
-/// Builds a [`CupsClient`] with transport options set.
+/// Builds a [`IppClient`] with transport options set.
 ///
 /// The plain constructors cover the common case of an unencrypted local
 /// daemon. This is for everything else: TLS trust, timeouts, and talking to a
 /// printer directly.
-pub struct CupsClientBuilder {
+pub struct IppClientBuilder {
     uri: String,
     user: Option<String>,
     basic_auth: Option<(String, String)>,
@@ -744,9 +753,9 @@ pub struct CupsClientBuilder {
     accept_invalid_certs: bool,
 }
 
-impl CupsClientBuilder {
+impl IppClientBuilder {
     fn new(uri: &str) -> Self {
-        CupsClientBuilder {
+        IppClientBuilder {
             uri: uri.to_string(),
             user: None,
             basic_auth: None,
@@ -814,7 +823,7 @@ impl CupsClientBuilder {
     ///
     /// This disables the check that the peer is who it claims to be, so an
     /// `ipps://` connection becomes encrypted but unauthenticated and offers
-    /// no protection against interception. Prefer [`CupsClientBuilder::ca_cert`].
+    /// no protection against interception. Prefer [`IppClientBuilder::ca_cert`].
     ///
     /// It exists because discovering a printer's certificate is sometimes
     /// impractical, and because a caller who has decided to accept that risk
@@ -826,7 +835,7 @@ impl CupsClientBuilder {
     }
 
     /// Builds the client.
-    pub fn build(self) -> Result<CupsClient> {
+    pub fn build(self) -> Result<IppClient> {
         let parsed: Uri = self
             .uri
             .parse()
@@ -857,7 +866,7 @@ impl CupsClientBuilder {
         }
 
         let user = self.user.unwrap_or_else(default_user);
-        Ok(CupsClient {
+        Ok(IppClient {
             inner: builder.build(),
             base: self.uri.trim_end_matches('/').to_string(),
             user,
@@ -931,7 +940,7 @@ impl<'a> PpdFilter<'a> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// Which jobs [`CupsClient::jobs`] should return.
+/// Which jobs [`IppClient::jobs`] should return.
 pub enum WhichJobs {
     /// Jobs still in the queue.
     NotCompleted,
@@ -948,7 +957,7 @@ impl WhichJobs {
     }
 }
 
-impl CupsClient {
+impl IppClient {
     /// Builds a `Cancel-Job` / `Hold-Job` / `Release-Job` request.
     ///
     /// Addresses the job via `<base>/printers/<printer>`, which assumes
@@ -1044,6 +1053,9 @@ impl CupsClient {
     }
 
     /// Moves a job to another queue.
+    ///
+    /// A CUPS extension (`CUPS-Move-Job`), not standard IPP, and meaningful
+    /// only where there is more than one queue to move between.
     ///
     /// The destination is named as a queue on this daemon, since moving a job
     /// to a printer the daemon does not know about is not a thing CUPS can do.
@@ -1240,7 +1252,7 @@ use futures::Stream;
 use ipp::operation::GetPrinterAttributes;
 use std::time::Duration;
 
-impl CupsClient {
+impl IppClient {
     /// Reads one queue's attributes, addressing it by its full IPP URI.
     /// Reads a printer by URI.
     ///
@@ -1267,7 +1279,7 @@ impl CupsClient {
     }
 }
 
-impl CupsClient {
+impl IppClient {
     /// Reads printers and active jobs in one pass.
     pub(crate) async fn snapshot(&self) -> Result<Snapshot> {
         Ok(Snapshot {
@@ -1335,7 +1347,7 @@ impl CupsClient {
     }
 }
 
-impl CupsClient {
+impl IppClient {
     /// Reads the job id CUPS assigned from a `Print-Job` reply.
     pub(crate) fn decode_job_id(resp: &IppRequestResponse) -> Result<JobId> {
         resp.attributes()
@@ -1489,7 +1501,7 @@ mod tests {
 
     #[test]
     fn decodes_every_printer_in_a_real_response() {
-        let printers = CupsClient::decode_printers(&fixture(), None);
+        let printers = IppClient::decode_printers(&fixture(), None);
         assert!(
             !printers.is_empty(),
             "fixture should contain at least one printer"
@@ -1503,10 +1515,10 @@ mod tests {
 
     #[test]
     fn the_named_default_is_the_one_marked_default() {
-        let all = CupsClient::decode_printers(&fixture(), None);
+        let all = IppClient::decode_printers(&fixture(), None);
         let name = all.first().expect("fixture has a printer").name.clone();
 
-        let marked = CupsClient::decode_printers(&fixture(), Some(&name));
+        let marked = IppClient::decode_printers(&fixture(), Some(&name));
         assert_eq!(marked.iter().filter(|p| p.is_default).count(), 1);
         assert!(marked.iter().find(|p| p.is_default).unwrap().name == name);
     }
@@ -1522,7 +1534,7 @@ mod tests {
             IppAttribute::with_name("job-id", IppValue::Integer(42)).unwrap(),
         );
 
-        assert_eq!(CupsClient::decode_job_id(&resp).unwrap(), 42);
+        assert_eq!(IppClient::decode_job_id(&resp).unwrap(), 42);
     }
 
     #[test]
@@ -1531,13 +1543,13 @@ mod tests {
         let resp =
             IppRequestResponse::new_response(IppVersion::v1_1(), StatusCode::SuccessfulOk, 1)
                 .unwrap();
-        let err = CupsClient::decode_job_id(&resp).unwrap_err();
+        let err = IppClient::decode_job_id(&resp).unwrap_err();
         assert!(err.to_string().contains("job-id"));
     }
 
     #[test]
     fn success_status_passes_the_check() {
-        assert!(CupsClient::check_status(&fixture(), "CUPS-Get-Printers").is_ok());
+        assert!(IppClient::check_status(&fixture(), "CUPS-Get-Printers").is_ok());
     }
 
     #[test]
@@ -1545,14 +1557,14 @@ mod tests {
         let mut resp = fixture();
         // 0x0400 = client-error-bad-request
         resp.header_mut().operation_or_status = 0x0400;
-        let err = CupsClient::check_status(&resp, "CUPS-Get-Printers").unwrap_err();
+        let err = IppClient::check_status(&resp, "CUPS-Get-Printers").unwrap_err();
         assert!(err.to_string().contains("CUPS-Get-Printers"));
     }
 
     #[tokio::test]
     #[ignore = "requires a running cupsd"]
     async fn lists_printers_from_the_live_daemon() {
-        let client = CupsClient::local().unwrap();
+        let client = IppClient::local().unwrap();
         let printers = client.printers().await.unwrap();
         assert!(printers.iter().all(|p| !p.name.is_empty()));
         // The target machine has no lpoptions file, so this exercises the
@@ -1566,7 +1578,7 @@ mod tests {
 
     #[tokio::test]
     async fn default_printer_is_cached_until_invalidated() {
-        let client = CupsClient::with_uri("http://localhost:631", "tester").unwrap();
+        let client = IppClient::with_uri("http://localhost:631", "tester").unwrap();
 
         // Prime the cache directly, bypassing lpoptions/network resolution
         // entirely. If `default_printer` reused the cache correctly, it
@@ -1592,7 +1604,7 @@ mod tests {
 
     #[test]
     fn the_jobs_request_asks_for_every_attribute_the_decoder_needs() {
-        let client = CupsClient::with_uri("http://localhost:631", "tester").unwrap();
+        let client = IppClient::with_uri("http://localhost:631", "tester").unwrap();
         let request = client.jobs_request(WhichJobs::NotCompleted).unwrap();
 
         let group = request
@@ -1613,20 +1625,20 @@ mod tests {
     #[test]
     fn a_response_with_no_job_groups_yields_no_jobs() {
         // CUPS answers an empty queue with operation attributes only.
-        assert!(CupsClient::decode_jobs(&fixture()).is_empty());
+        assert!(IppClient::decode_jobs(&fixture()).is_empty());
     }
 
     #[tokio::test]
     #[ignore = "requires a running cupsd"]
     async fn lists_jobs_from_the_live_daemon() {
-        let client = CupsClient::local().unwrap();
+        let client = IppClient::local().unwrap();
         let jobs = client.jobs(WhichJobs::NotCompleted).await.unwrap();
         assert!(jobs.iter().all(|j| j.state.is_active()));
     }
 
     #[test]
     fn the_job_request_asks_for_every_attribute_the_decoder_needs() {
-        let client = CupsClient::with_uri("http://localhost:631", "tester").unwrap();
+        let client = IppClient::with_uri("http://localhost:631", "tester").unwrap();
         let request = client.job_request("HP-8210", 42).unwrap();
 
         assert_eq!(
@@ -1669,7 +1681,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires a running cupsd"]
     async fn a_job_id_the_daemon_never_heard_of_is_none_not_an_error() {
-        let client = CupsClient::local().unwrap();
+        let client = IppClient::local().unwrap();
         // CUPS numbers jobs from 1 upwards; this id will not exist.
         let job = client
             .job("HP-OfficeJet-Pro-8210", 2_000_000_000)
@@ -1680,7 +1692,7 @@ mod tests {
 
     #[test]
     fn move_job_names_the_destination_in_the_job_group() {
-        let client = CupsClient::with_uri("http://localhost:631", "tester").unwrap();
+        let client = IppClient::with_uri("http://localhost:631", "tester").unwrap();
         let request = client
             .move_job_request("HP-8210", 42, "Office-Laser")
             .unwrap();
@@ -1737,7 +1749,7 @@ mod tests {
 
     #[test]
     fn identify_printer_uses_the_right_opcode_not_the_placeholder() {
-        let client = CupsClient::with_uri("http://localhost:631", "tester").unwrap();
+        let client = IppClient::with_uri("http://localhost:631", "tester").unwrap();
         let request = client
             .identify_printer_request(
                 client.printer_uri("HP-8210").unwrap(),
@@ -1765,7 +1777,7 @@ mod tests {
 
     #[test]
     fn identifying_by_display_carries_the_message() {
-        let client = CupsClient::with_uri("http://localhost:631", "tester").unwrap();
+        let client = IppClient::with_uri("http://localhost:631", "tester").unwrap();
         let request = client
             .identify_printer_request(
                 client.printer_uri("HP-8210").unwrap(),
@@ -1789,7 +1801,7 @@ mod tests {
 
     #[test]
     fn validate_job_asks_about_a_document_format() {
-        let client = CupsClient::with_uri("http://localhost:631", "tester").unwrap();
+        let client = IppClient::with_uri("http://localhost:631", "tester").unwrap();
         let request = client
             .validate_job_request(client.printer_uri("HP-8210").unwrap(), "application/pdf")
             .unwrap();
@@ -1816,7 +1828,7 @@ mod tests {
 
     #[test]
     fn job_action_request_carries_id_user_and_operation() {
-        let client = CupsClient::with_uri("http://localhost:631", "tester").unwrap();
+        let client = IppClient::with_uri("http://localhost:631", "tester").unwrap();
         let request = client
             .job_action_request(
                 Operation::HoldJob,
@@ -1850,7 +1862,7 @@ mod tests {
 
     #[test]
     fn release_uses_its_own_operation_code() {
-        let client = CupsClient::with_uri("http://localhost:631", "tester").unwrap();
+        let client = IppClient::with_uri("http://localhost:631", "tester").unwrap();
         let request = client
             .job_action_request(
                 Operation::ReleaseJob,

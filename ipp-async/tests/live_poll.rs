@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use cups_client::{CupsClient, PrinterEvent};
 use futures::StreamExt;
+use ipp_async::{IppClient, PrinterEvent};
 
 #[tokio::test]
 #[ignore = "requires a running cupsd"]
 async fn the_event_stream_opens_with_a_resynchronisation() {
-    let client = CupsClient::local().unwrap();
+    let client = IppClient::local().unwrap();
     let mut stream = Box::pin(client.events());
 
     let first = stream
@@ -28,7 +28,7 @@ async fn a_real_queue_advertises_its_job_options() {
     // Guards the assumption the option decoding rests on: CUPS-Get-Printers
     // returns the *-supported and *-default attributes for every queue, so no
     // per-printer Get-Printer-Attributes is needed.
-    let client = CupsClient::local().unwrap();
+    let client = IppClient::local().unwrap();
     let printers = client.printers().await.expect("printers");
     let Some(printer) = printers.first() else {
         eprintln!("no queues configured, nothing to assert");
@@ -53,7 +53,7 @@ async fn a_real_queue_advertises_its_job_options() {
     // pairs borderless variants by the dimensions parsed out of it.
     for keyword in &o.media.supported {
         assert!(
-            cups_client::MediaSize::parse(keyword).is_some(),
+            ipp_async::MediaSize::parse(keyword).is_some(),
             "unparseable media name: {keyword}"
         );
     }
@@ -65,9 +65,9 @@ async fn a_device_id_narrows_the_driver_list() {
     // The whole add-printer design rests on cupsd doing this filtering: an
     // unfiltered list is ~2300 drivers, which is not choosable. Note lpinfo's
     // --device-id flag does NOT filter, only the IPP operation does.
-    use cups_client::PpdFilter;
+    use ipp_async::PpdFilter;
 
-    let client = CupsClient::local().unwrap();
+    let client = IppClient::local().unwrap();
     let all = client.ppds(None).await.expect("unfiltered");
     if all.is_empty() {
         eprintln!("no drivers installed, nothing to compare against");
@@ -100,7 +100,7 @@ async fn classes_are_listed_without_error() {
     // Most systems have no classes configured, so this asserts the operation
     // succeeds and decodes rather than asserting a count: an unsupported
     // operation or a decode failure must not look like "no classes".
-    let client = CupsClient::local().unwrap();
+    let client = IppClient::local().unwrap();
     let classes = client.classes().await.expect("CUPS-Get-Classes succeeds");
     eprintln!("{} classes configured", classes.len());
     assert!(classes.iter().all(|c| !c.name.is_empty()));
@@ -113,7 +113,7 @@ async fn an_ipps_connection_needs_the_certificate_trusted() {
     // CUPS serves ipps on the same port and signs it with a self-signed
     // certificate, which is exactly what printers do. Verification must fail
     // by default, and the caller must be able to tell why.
-    let strict = CupsClient::builder("ipps://localhost:631").build().unwrap();
+    let strict = IppClient::builder("ipps://localhost:631").build().unwrap();
     let refused = strict.printers().await;
 
     match refused {
@@ -133,7 +133,7 @@ async fn an_ipps_connection_needs_the_certificate_trusted() {
 async fn ipps_works_when_the_caller_accepts_the_certificate() {
     // The same connection succeeds once the caller opts out of verification,
     // which proves TLS itself works and that the only obstacle was trust.
-    let client = CupsClient::builder("ipps://localhost:631")
+    let client = IppClient::builder("ipps://localhost:631")
         .danger_accept_invalid_certs(true)
         .build()
         .unwrap();
@@ -148,7 +148,7 @@ async fn a_queue_can_be_paused_and_resumed() {
     // Pause is administrative, so an unauthorised client is refused. Either
     // outcome proves the operation reached CUPS and was understood; what must
     // not happen is a silent success that changes nothing.
-    let client = CupsClient::local().unwrap();
+    let client = IppClient::local().unwrap();
     let printers = client.printers().await.unwrap();
     let Some(target) = printers.first() else {
         eprintln!("no queues configured");
@@ -161,7 +161,7 @@ async fn a_queue_can_be_paused_and_resumed() {
             let paused = client.printer(&target.name).await.unwrap();
             assert_eq!(
                 paused.state,
-                cups_client::PrinterState::Stopped,
+                ipp_async::PrinterState::Stopped,
                 "a paused queue reports itself stopped"
             );
             queue.resume().await.expect("resume");
@@ -177,7 +177,7 @@ async fn round_trip_cost_against_a_real_daemon() {
     // work, and how much is the daemon and the socket. Printed rather than
     // asserted, because a timing threshold in a test suite is a flake waiting
     // to happen.
-    let client = CupsClient::local().unwrap();
+    let client = IppClient::local().unwrap();
 
     // Warm the connection so the first TCP setup is not counted.
     let _ = client.printers().await;

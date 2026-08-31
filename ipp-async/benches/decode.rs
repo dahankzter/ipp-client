@@ -30,7 +30,7 @@ fn benches(c: &mut Criterion) {
             let decoded: Vec<_> = response
                 .attributes()
                 .groups_of(DelimiterTag::PrinterAttributes)
-                .filter_map(|g| cups_client::Printer::decode(g).ok())
+                .filter_map(|g| ipp_async::Printer::decode(g).ok())
                 .collect();
             std::hint::black_box(decoded)
         })

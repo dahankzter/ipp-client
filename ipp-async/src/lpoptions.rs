@@ -76,7 +76,7 @@ mod tests {
 
     #[test]
     fn user_file_wins_over_system_file() {
-        let dir = std::env::temp_dir().join("cups-client-lpoptions-test");
+        let dir = std::env::temp_dir().join("ipp-async-lpoptions-test");
         std::fs::create_dir_all(&dir).unwrap();
         let user = dir.join("user");
         let system = dir.join("system");

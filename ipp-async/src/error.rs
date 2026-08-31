@@ -78,7 +78,7 @@ impl Error {
     ///
     /// Printers overwhelmingly ship self-signed certificates, so this is the
     /// error a caller is most likely to want to act on - by pinning the
-    /// certificate with [`crate::CupsClientBuilder::ca_cert`], or by telling
+    /// certificate with [`crate::IppClientBuilder::ca_cert`], or by telling
     /// the user why the printer cannot be reached.
     pub fn is_certificate_error(&self) -> bool {
         let mut source: Option<&(dyn std::error::Error + 'static)> = Some(self);

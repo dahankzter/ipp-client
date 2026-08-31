@@ -45,6 +45,21 @@ impl IppEvePrinter {
         }
     }
 
+    /// Waits for the printer to spool a document of exactly this size.
+    ///
+    /// Polls rather than sleeping a fixed time: the printer writes the spool
+    /// file when it gets round to it, and a fixed wait that is long enough on
+    /// an idle machine is not long enough when the whole suite is running.
+    pub async fn await_spooled_document(&self, bytes: u64) -> bool {
+        for _ in 0..100 {
+            if self.largest_spooled_document() == Some(bytes) {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        false
+    }
+
     /// The largest document the printer has spooled, in bytes.
     ///
     /// `ippeveprinter` writes each received document into its spool directory,

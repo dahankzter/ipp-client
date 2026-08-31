@@ -31,8 +31,8 @@ async fn discovery_returns_addressable_devices() {
     // covered - decoding by the fake mechanism, reachability by
     // `the_mechanism_is_reachable` - so it stays opt-in rather than making
     // every full run hostage to the network.
-    if std::env::var("CUPS_CLIENT_LIVE_DISCOVERY").as_deref() != Ok("1") {
-        eprintln!("skipping: set CUPS_CLIENT_LIVE_DISCOVERY=1 to run a real discovery sweep");
+    if std::env::var("IPP_ASYNC_LIVE_DISCOVERY").as_deref() != Ok("1") {
+        eprintln!("skipping: set IPP_ASYNC_LIVE_DISCOVERY=1 to run a real discovery sweep");
         return;
     }
 
