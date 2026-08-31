@@ -13,23 +13,37 @@ pub enum Error {
     /// refused connection from a rejected certificate has to be able to look.
     #[error("cannot reach the print service: {message}")]
     Transport {
+        /// What went wrong, as reported by the transport.
         message: String,
+        /// The underlying cause, where there was one.
         #[source]
         source: Option<Box<dyn std::error::Error + Send + Sync>>,
     },
 
     /// CUPS answered with a non-success IPP status code.
     #[error("CUPS returned {status} for {operation}")]
-    Ipp { operation: String, status: String },
+    Ipp {
+        /// The operation that was refused, by its IPP name.
+        operation: String,
+        /// The status the peer answered with.
+        status: String,
+    },
 
     /// An IPP attribute could not be decoded into a domain type.
     #[error("cannot decode attribute {attribute}: {detail}")]
-    Decode { attribute: String, detail: String },
+    Decode {
+        /// The IPP attribute that could not be read.
+        attribute: String,
+        /// Why not.
+        detail: String,
+    },
 
+    /// Reading a document from disk failed.
     #[error("io error: {0}")]
     Io(#[from] io::Error),
 }
 
+/// The result type every fallible operation in this crate returns.
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl Error {

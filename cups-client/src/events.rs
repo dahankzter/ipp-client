@@ -9,9 +9,13 @@ pub enum PrinterEvent {
     // Job or Printer would make every JobRemoved carry hundreds of unused
     // bytes through the stream. Vec-carrying variants are already pointer-
     // sized and need no boxing.
+    /// A job appeared that was not in the previous snapshot.
     JobAdded(Box<Job>),
+    /// A job's state, progress or reasons changed.
     JobChanged(Box<Job>),
+    /// A job left the queue, by finishing or being cancelled.
     JobRemoved(JobId),
+    /// A printer's state, reasons or supplies changed.
     PrinterChanged(Box<Printer>),
     /// A queue CUPS no longer knows about, by name. Without this a deleted
     /// queue would sit in the panel forever, permanently idle.
@@ -19,7 +23,9 @@ pub enum PrinterEvent {
     /// A full state reload. Emitted on connect and after any recovery, so the
     /// consumer always has a way back to a known-good state.
     Resynchronised {
+        /// Every printer the daemon knows about.
         printers: Vec<Printer>,
+        /// Every job visible to this client.
         jobs: Vec<Job>,
     },
 }

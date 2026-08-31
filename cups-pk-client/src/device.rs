@@ -14,9 +14,14 @@ pub struct Device {
     pub uri: String,
     /// `network`, `direct`, `file`, or a backend-specific value.
     pub class: String,
+    /// A human description, as the backend reported it.
     pub info: String,
+    /// Manufacturer and model, used to search for a driver when the device id
+    /// is absent.
     pub make_and_model: String,
+    /// The IEEE-1284 device id. The most precise thing to match a driver on.
     pub device_id: String,
+    /// Where the device says it is, where it says anything.
     pub location: String,
 }
 

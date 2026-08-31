@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+#![deny(missing_docs)]
 // The README is the crate documentation, so its examples are compiled and run
 // by `cargo test --doc` and cannot quietly rot.
 #![doc = include_str!("../README.md")]

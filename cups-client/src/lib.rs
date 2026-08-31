@@ -1,6 +1,77 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Async CUPS client speaking IPP to the local print daemon.
+//! An async IPP client, in Rust, with no `libcups`.
+//!
+//! IPP is the protocol printers and print servers speak. CUPS is one server
+//! that speaks it, so this talks to CUPS, to a driverless network printer
+//! directly, or to anything else implementing the standard.
+//!
+//! # Listing what a daemon knows about
+//!
+//! ```no_run
+//! # async fn example() -> cups_client::Result<()> {
+//! let client = cups_client::CupsClient::local()?;
+//!
+//! for printer in client.printers().await? {
+//!     println!("{}: {:?}", printer.name, printer.state);
+//! }
+//! # Ok(()) }
+//! ```
+//!
+//! # Working with one printer
+//!
+//! [`CupsClient::queue`] names a queue on the daemon; [`CupsClient::at`] takes
+//! any printer's URI, with no CUPS in the path. Both give an [`IppPrinter`]
+//! carrying the same operations.
+//!
+//! ```no_run
+//! # async fn example() -> cups_client::Result<()> {
+//! let client = cups_client::CupsClient::local()?;
+//! let printer = client.at("ipp://printer.local/ipp/print")?;
+//!
+//! // Ask before uploading, so a rejected format costs nothing.
+//! printer.validate("application/pdf").await?;
+//! printer.print_file(std::path::Path::new("report.pdf")).await?;
+//! # Ok(()) }
+//! ```
+//!
+//! Documents are streamed rather than read into memory, so printing a large
+//! file does not hold it all at once.
+//!
+//! # Reaching a printer over TLS
+//!
+//! `ipps://` needs the `tls` feature, which is on by default. Printers almost
+//! always present self-signed certificates, so verification fails against them
+//! unless the certificate is trusted explicitly:
+//!
+//! ```no_run
+//! # fn example() -> cups_client::Result<()> {
+//! let client = cups_client::CupsClient::builder("ipps://printer.local:631")
+//!     .ca_cert(std::fs::read("printer.pem")?)
+//!     .build()?;
+//! # Ok(()) }
+//! ```
+//!
+//! [`Error::is_certificate_error`] identifies the failure when it has not been.
+//!
+//! # Administration
+//!
+//! Operations such as pausing a queue need authorisation, and an
+//! unauthenticated caller is refused with `401`. Either supply credentials
+//! with [`CupsClientBuilder::basic_auth`], or - on a desktop, where a password
+//! prompt belongs to the system rather than to your process - drive
+//! `cups-pk-helper` over D-Bus with the companion `cups-pk-client` crate, and
+//! let polkit ask.
+//!
+//! # C dependencies
+//!
+//! With `default-features = false` there are none: no `-sys` crate, no `cc`,
+//! no `cmake`, nothing to install before building. That build cannot speak
+//! `ipps://`. The default build can, and pays for it with rustls' `aws-lc-rs`
+//! provider, which compiles a vendored BoringSSL at build time. Nothing is
+//! needed at runtime either way.
+
+#![deny(missing_docs)]
 
 pub(crate) mod attrs;
 mod client;

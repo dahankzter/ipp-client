@@ -20,6 +20,7 @@ pub enum CupsPkError {
     Transport(String),
 }
 
+/// The result type every fallible operation in this crate returns.
 pub type Result<T> = std::result::Result<T, CupsPkError>;
 
 /// Translates the mechanism's error convention.

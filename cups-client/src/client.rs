@@ -76,6 +76,9 @@ impl CupsClient {
         CupsClientBuilder::new(uri)
     }
 
+    /// Connects to an IPP endpoint, attributing jobs to `user`.
+    ///
+    /// For TLS trust, credentials or timeouts, use [`CupsClient::builder`].
     pub fn with_uri(uri: &str, user: &str) -> Result<Self> {
         let parsed: Uri = uri
             .parse()
@@ -928,6 +931,7 @@ impl<'a> PpdFilter<'a> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Which jobs [`CupsClient::jobs`] should return.
 pub enum WhichJobs {
     /// Jobs still in the queue.
     NotCompleted,
