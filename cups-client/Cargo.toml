@@ -37,3 +37,8 @@ async-stream = "0.3"
 
 [dev-dependencies]
 tokio = { version = "1.49", default-features = false, features = ["macros", "rt"] }
+criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "decode"
+harness = false

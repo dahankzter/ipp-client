@@ -37,6 +37,34 @@ They were extracted from [COSMIC Printing](https://github.com/dahankzter/cosmic-
 which remains their main consumer, but neither depends on COSMIC or on
 `libcosmic`.
 
+## On speed
+
+Measured on the development machine, against a live `cupsd`:
+
+| | |
+|---|---|
+| `CUPS-Get-Printers` round trip | 20.7 ms |
+| parsing that 15 KB response | 48.6 µs |
+| decoding it into these types | 2.2 µs |
+
+So this crate's own work is about a quarter of one percent of a call. Raw
+parsing speed is not where a printing client is slow, and any claim that these
+bindings are faster than another set at that would be noise.
+
+Where the difference is real is in what an async program can do while a call is
+in flight. `libcups` is blocking C, so an async caller has to hand every
+operation to a blocking thread pool and hold a thread for the duration. This is
+async to the socket, and documents are streamed rather than read into memory, so
+printing a large file neither holds it whole nor blocks the executor while it is
+read.
+
+Not measured: any head-to-head against `libcups` bindings. That needs a harness
+neither crate has, and the numbers above suggest it would mostly measure the
+daemon.
+
+`cargo bench -p cups-client` reproduces the two benchmarks; the round trip is
+`cargo nextest run -p cups-client --run-ignored all -E 'test(round_trip_cost)'`.
+
 ## Tests
 
 ```sh

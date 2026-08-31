@@ -169,3 +169,26 @@ async fn a_queue_can_be_paused_and_resumed() {
         Err(e) => eprintln!("pause refused, as an unauthorised caller should be: {e}"),
     }
 }
+
+#[tokio::test]
+#[ignore = "requires a running cupsd; measures rather than asserts"]
+async fn round_trip_cost_against_a_real_daemon() {
+    // Context for the decode benchmarks: how much of a call is this crate's
+    // work, and how much is the daemon and the socket. Printed rather than
+    // asserted, because a timing threshold in a test suite is a flake waiting
+    // to happen.
+    let client = CupsClient::local().unwrap();
+
+    // Warm the connection so the first TCP setup is not counted.
+    let _ = client.printers().await;
+
+    let runs = 50;
+    let start = std::time::Instant::now();
+    for _ in 0..runs {
+        client.printers().await.expect("printers");
+    }
+    let each = start.elapsed() / runs;
+
+    eprintln!("CUPS-Get-Printers round trip: {each:?} each over {runs} runs");
+    eprintln!("  of which parse+decode is about 51us, measured by benches/decode.rs");
+}
