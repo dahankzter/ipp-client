@@ -20,8 +20,8 @@ pub enum Error {
         source: Option<Box<dyn std::error::Error + Send + Sync>>,
     },
 
-    /// CUPS answered with a non-success IPP status code.
-    #[error("CUPS returned {status} for {operation}")]
+    /// The printer or server answered with a non-success IPP status code.
+    #[error("{operation} was refused with {status}")]
     Ipp {
         /// The operation that was refused, by its IPP name.
         operation: String,

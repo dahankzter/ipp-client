@@ -192,3 +192,101 @@ async fn round_trip_cost_against_a_real_daemon() {
     eprintln!("CUPS-Get-Printers round trip: {each:?} each over {runs} runs");
     eprintln!("  of which parse+decode is about 51us, measured by benches/decode.rs");
 }
+
+#[tokio::test]
+#[ignore = "requires a running cupsd"]
+async fn a_subscription_can_be_created_collected_and_cancelled() {
+    use ipp_async::NotifyEvent;
+
+    let client = IppClient::local().unwrap();
+    let printers = client.printers().await.unwrap();
+    let Some(target) = printers.first() else {
+        eprintln!("no queues configured");
+        return;
+    };
+    let printer = client.queue(&target.name).unwrap();
+
+    let sub = printer
+        .subscribe(
+            &[NotifyEvent::PrinterStateChanged, NotifyEvent::JobCreated],
+            Some(std::time::Duration::from_secs(60)),
+        )
+        .await
+        .expect("a subscription is created");
+    eprintln!(
+        "subscription {} events={:?} lease={:?}",
+        sub.id, sub.events, sub.lease
+    );
+    assert!(sub.id > 0);
+
+    // It must be findable among this user's subscriptions.
+    let all = printer.subscriptions().await.expect("list");
+    assert!(
+        all.iter().any(|s| s.id == sub.id),
+        "the new subscription is listed"
+    );
+
+    let one = printer.subscription(sub.id).await.expect("read one");
+    assert_eq!(one.id, sub.id);
+
+    // Nothing has happened yet, so this is about the call working rather than
+    // the events. CUPS answers at once and says when to ask again.
+    let notifications = printer.notifications(&[sub.id]).await.expect("collect");
+    eprintln!(
+        "  {} events waiting, poll again after {:?}",
+        notifications.events.len(),
+        notifications.poll_after
+    );
+
+    printer
+        .renew_subscription(sub.id, Some(std::time::Duration::from_secs(120)))
+        .await
+        .expect("renew");
+    printer.cancel_subscription(sub.id).await.expect("cancel");
+
+    let after = printer.subscriptions().await.unwrap_or_default();
+    assert!(
+        !after.iter().any(|s| s.id == sub.id),
+        "a cancelled subscription is gone"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires a running cupsd"]
+async fn cups_understands_the_administrative_operations() {
+    // Against CUPS these are authorised operations, so an unauthenticated
+    // caller gets 401. That still proves the request reached the daemon and
+    // was understood: an unknown operation or a malformed request comes back
+    // differently.
+    let client = IppClient::local().unwrap();
+    let printers = client.printers().await.unwrap();
+    let Some(target) = printers.first() else {
+        eprintln!("no queues configured");
+        return;
+    };
+    let printer = client.queue(&target.name).unwrap();
+
+    for (name, result) in [
+        ("disable", printer.disable().await),
+        ("hold_new_jobs", printer.hold_new_jobs().await),
+        ("cancel_all_jobs", printer.cancel_all_jobs().await),
+    ] {
+        match result {
+            Ok(()) => eprintln!("  {name}: accepted (this client is authorised)"),
+            Err(e) => {
+                let text = e.to_string();
+                assert!(
+                    !text.contains("Invalid tag") && !text.contains("BadRequest"),
+                    "{name} was malformed rather than refused: {text}"
+                );
+                eprintln!("  {name}: {text}");
+            }
+        }
+    }
+
+    // Cancelling one's own jobs needs no authorisation, so this one must work.
+    printer
+        .cancel_my_jobs()
+        .await
+        .expect("cancelling one's own jobs is always permitted");
+}

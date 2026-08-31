@@ -382,6 +382,32 @@ impl Class {
     }
 }
 
+/// One document within a job.
+///
+/// IPP allows a job to hold several documents. Servers that do not implement
+/// the Document Object extension never report these.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Document {
+    /// Its number within the job, counting from one.
+    pub number: i32,
+    /// The document's name, where one was given.
+    pub name: Option<String>,
+    /// Its format, as a MIME type.
+    pub format: Option<String>,
+}
+
+impl Document {
+    /// Reads a document from an IPP document-attributes group.
+    pub fn decode(group: &IppAttributeGroup) -> Result<Document> {
+        let a = Attrs::new(group);
+        Ok(Document {
+            number: a.require_int("document-number")?,
+            name: a.text("document-name"),
+            format: a.text("document-format"),
+        })
+    }
+}
+
 /// A driver CUPS offers, as returned by `CUPS-Get-PPDs`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ppd {
@@ -597,8 +623,8 @@ mod tests {
     use ipp::prelude::*;
     // Re-import our types to shadow the conflicting ipp ones
     use super::{
-        Class, JobState, MediaSize, OptionValues, Ppd, PrintQuality, PrinterState, Severity,
-        StateReason, Supply, SupplyLevel,
+        Class, Document, JobState, MediaSize, OptionValues, Ppd, PrintQuality, PrinterState,
+        Severity, StateReason, Supply, SupplyLevel,
     };
 
     fn printer_group(extra: Vec<(&str, IppValue)>) -> IppAttributeGroup {
@@ -673,6 +699,36 @@ mod tests {
             .unwrap(),
         );
         assert!(Class::decode(&g).unwrap().members.is_empty());
+    }
+
+    #[test]
+    fn decodes_a_document() {
+        let mut g = IppAttributeGroup::new(DelimiterTag::PrinterAttributes);
+        for (name, value) in [
+            ("document-number", IppValue::Integer(1)),
+            (
+                "document-name",
+                IppValue::NameWithoutLanguage("report.pdf".try_into().unwrap()),
+            ),
+            (
+                "document-format",
+                IppValue::MimeMediaType("application/pdf".try_into().unwrap()),
+            ),
+        ] {
+            g.attributes_mut()
+                .push(IppAttribute::with_name(name, value).unwrap());
+        }
+        let d = Document::decode(&g).unwrap();
+        assert_eq!(d.number, 1);
+        assert_eq!(d.name.as_deref(), Some("report.pdf"));
+        assert_eq!(d.format.as_deref(), Some("application/pdf"));
+    }
+
+    #[test]
+    fn a_document_without_a_number_is_a_decode_error() {
+        // The number is how a document is addressed within its job.
+        let g = IppAttributeGroup::new(DelimiterTag::PrinterAttributes);
+        assert!(Document::decode(&g).is_err());
     }
 
     #[test]

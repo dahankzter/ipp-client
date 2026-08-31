@@ -85,13 +85,15 @@ mod error;
 mod events;
 mod lpoptions;
 mod model;
+mod subscription;
 
 pub use client::{IdentifyAction, IppClient, IppClientBuilder, IppPrinter, PpdFilter, WhichJobs};
 pub use error::{Error, Result};
 pub use events::PrinterEvent;
 pub use lpoptions::{default_printer, default_printer_from};
 pub use model::{
-    Class, Job, JobId, JobProgress, JobState, MediaSize, OptionValues, Ppd, PrintQuality, Printer,
-    PrinterOptions, PrinterState, Severity, StateReason, Supply, SupplyLevel,
+    Class, Document, Job, JobId, JobProgress, JobState, MediaSize, OptionValues, Ppd, PrintQuality,
+    Printer, PrinterOptions, PrinterState, Severity, StateReason, Supply, SupplyLevel,
     printer_name_from_uri,
 };
+pub use subscription::{Notification, Notifications, NotifyEvent, Subscription};

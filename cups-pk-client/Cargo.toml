@@ -10,6 +10,9 @@ repository.workspace = true
 readme = "README.md"
 rust-version = "1.93"
 
+[package.metadata.docs.rs]
+all-features = true
+
 [dependencies]
 zbus = { version = "5.14", default-features = false, features = ["tokio"] }
 thiserror.workspace = true

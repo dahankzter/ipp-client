@@ -70,6 +70,21 @@ daemon.
 `cargo bench -p ipp-async` reproduces the two benchmarks; the round trip is
 `cargo nextest run -p ipp-async --run-ignored all -E 'test(round_trip_cost)'`.
 
+## Platforms
+
+Linux is what this is developed and tested on. Nothing in `ipp-async` is
+Unix-specific — it compiles for `x86_64-pc-windows-gnu` — and the one place that
+assumes a Unix layout, reading the default printer from `~/.cups/lpoptions` and
+`/etc/cups/lpoptions`, falls back to asking the server over IPP when those are
+absent.
+
+The default build does not cross-compile without a C toolchain for the target,
+because aws-lc-rs has to build its vendored C. `--no-default-features` cross-
+compiles cleanly.
+
+`cups-pk-client` talks to a D-Bus service that exists on Linux, so it is
+Linux-only in practice however well it compiles elsewhere.
+
 ## Tests
 
 ```sh
