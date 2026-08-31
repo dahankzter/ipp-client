@@ -34,6 +34,32 @@ impl CupsClient {
         Self::with_uri(LOCAL_CUPS, &default_user())
     }
 
+    /// A handle to any IPP printer, by URI.
+    ///
+    /// The printer needs no relationship to the daemon this client points at:
+    /// this is how to reach a driverless network printer directly, with no
+    /// CUPS in the path.
+    pub fn at(&self, uri: &str) -> Result<IppPrinter<'_>> {
+        let parsed: Uri = uri
+            .parse()
+            .map_err(|e| Error::transport_msg(format!("bad printer uri {uri}: {e}")))?;
+        Ok(IppPrinter {
+            client: self,
+            uri: parsed,
+        })
+    }
+
+    /// A handle to a queue on the CUPS daemon this client is connected to.
+    ///
+    /// A convenience over [`CupsClient::at`] that knows CUPS' URI convention,
+    /// so a queue can be named rather than spelled out.
+    pub fn queue(&self, name: &str) -> Result<IppPrinter<'_>> {
+        Ok(IppPrinter {
+            client: self,
+            uri: self.printer_uri(name)?,
+        })
+    }
+
     /// Starts building a client with options the plain constructors do not take.
     ///
     /// ```no_run
@@ -421,6 +447,138 @@ impl CupsClient {
     }
 }
 
+/// One printer, addressed by its own URI.
+///
+/// Every operation here is standard IPP, so the printer at the other end can
+/// be a CUPS queue, a driverless network printer, or anything else that speaks
+/// the protocol. Obtain one with [`CupsClient::at`] for an arbitrary printer,
+/// or [`CupsClient::queue`] for a queue on the CUPS daemon this client is
+/// connected to.
+///
+/// ```no_run
+/// # async fn example() -> cups_client::Result<()> {
+/// let client = cups_client::CupsClient::local()?;
+///
+/// // A queue on the local daemon.
+/// let queue = client.queue("Office-Laser")?;
+/// println!("{:?}", queue.attributes().await?.state);
+///
+/// // A printer with no CUPS involved at all.
+/// let direct = client.at("ipp://printer.local/ipp/print")?;
+/// direct.identify(cups_client::IdentifyAction::Flash).await?;
+/// # Ok(()) }
+/// ```
+pub struct IppPrinter<'a> {
+    client: &'a CupsClient,
+    uri: Uri,
+}
+
+impl IppPrinter<'_> {
+    /// The printer's URI.
+    pub fn uri(&self) -> &Uri {
+        &self.uri
+    }
+
+    /// Everything the printer reports about itself: state, reasons, supply
+    /// levels and the job defaults it advertises.
+    pub async fn attributes(&self) -> Result<Printer> {
+        let op = GetPrinterAttributes::new(self.uri.clone()).map_err(Error::transport)?;
+        let resp = self.client.send(op, "Get-Printer-Attributes").await?;
+
+        resp.attributes()
+            .groups_of(DelimiterTag::PrinterAttributes)
+            .next()
+            .ok_or_else(|| Error::decode("printer-attributes", "no printer group in response"))
+            .and_then(Printer::decode)
+    }
+
+    /// Submits a document read from a stream, without holding it in memory.
+    ///
+    /// See [`CupsClient::print_stream`] for why this uses `Create-Job` and
+    /// `Send-Document` rather than `Print-Job`.
+    pub async fn print_stream<R>(
+        &self,
+        reader: R,
+        document_format: Option<&str>,
+        job_name: &str,
+    ) -> Result<JobId>
+    where
+        R: tokio::io::AsyncRead + Send + Unpin + 'static,
+    {
+        self.client
+            .print_stream_at(self.uri.clone(), reader, document_format, job_name)
+            .await
+    }
+
+    /// Submits a file, letting the printer or daemon type it.
+    pub async fn print_file(&self, path: &std::path::Path) -> Result<JobId> {
+        let job_name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "document".to_string());
+        let file = tokio::fs::File::open(path).await?;
+        self.print_stream(file, Some("application/octet-stream"), &job_name)
+            .await
+    }
+
+    /// Cancels a job on this printer.
+    pub async fn cancel_job(&self, id: JobId) -> Result<()> {
+        self.job_action(Operation::CancelJob, "Cancel-Job", id)
+            .await
+    }
+
+    /// Holds a job on this printer.
+    pub async fn hold_job(&self, id: JobId) -> Result<()> {
+        self.job_action(Operation::HoldJob, "Hold-Job", id).await
+    }
+
+    /// Releases a held job on this printer.
+    pub async fn release_job(&self, id: JobId) -> Result<()> {
+        self.job_action(Operation::ReleaseJob, "Release-Job", id)
+            .await
+    }
+
+    /// Reprints a finished job, where the document is still held.
+    pub async fn restart_job(&self, id: JobId) -> Result<()> {
+        self.job_action(Operation::RestartJob, "Restart-Job", id)
+            .await
+    }
+
+    /// Removes every job from this printer, including other users' jobs.
+    ///
+    /// Administrative: an unauthorised caller is refused rather than ignored.
+    pub async fn purge_jobs(&self) -> Result<()> {
+        let op = PurgeJobs::new(self.uri.clone(), Some(self.client.user.as_str()))
+            .map_err(Error::transport)?;
+        self.client.send(op, "Purge-Jobs").await?;
+        Ok(())
+    }
+
+    /// Asks whether a job in this format would be accepted, without sending
+    /// one. Worth doing before a long upload.
+    pub async fn validate(&self, document_format: &str) -> Result<()> {
+        self.client
+            .validate_job_at(self.uri.clone(), document_format)
+            .await
+    }
+
+    /// Makes the printer announce itself, so it can be told apart from an
+    /// identical one nearby.
+    pub async fn identify(&self, action: IdentifyAction) -> Result<()> {
+        self.client
+            .identify_printer_at(self.uri.clone(), action)
+            .await
+    }
+
+    async fn job_action(&self, operation: Operation, label: &str, id: JobId) -> Result<()> {
+        let request = self
+            .client
+            .job_action_request(operation, self.uri.clone(), id)?;
+        self.client.send(request, label).await?;
+        Ok(())
+    }
+}
+
 /// Builds a [`CupsClient`] with transport options set.
 ///
 /// The plain constructors cover the common case of an unencrypted local
@@ -752,8 +910,7 @@ impl CupsClient {
         Ok(())
     }
 
-    /// The same, against a printer identified by URI.
-    pub async fn identify_printer_at(&self, uri: Uri, action: IdentifyAction) -> Result<()> {
+    pub(crate) async fn identify_printer_at(&self, uri: Uri, action: IdentifyAction) -> Result<()> {
         let request = self.identify_printer_request(uri, action)?;
         self.send(request, "Identify-Printer").await?;
         Ok(())
@@ -834,11 +991,7 @@ impl CupsClient {
             .await
     }
 
-    /// The same, against a printer identified by URI.
-    ///
-    /// Pairs with [`CupsClient::print_stream_at`]: ask first, then stream, so a
-    /// remote printer rejects the format before the upload rather than after.
-    pub async fn validate_job_at(&self, uri: Uri, document_format: &str) -> Result<()> {
+    pub(crate) async fn validate_job_at(&self, uri: Uri, document_format: &str) -> Result<()> {
         let request = self.validate_job_request(uri, document_format)?;
         self.send(request, "Validate-Job").await?;
         Ok(())
@@ -894,6 +1047,10 @@ use std::time::Duration;
 
 impl CupsClient {
     /// Reads one queue's attributes, addressing it by its full IPP URI.
+    /// Reads a printer by URI.
+    ///
+    /// Equivalent to `client.at(uri)?.attributes()`, kept because reading a
+    /// printer's own advertisement is a common one-shot.
     pub async fn printer_at(&self, uri: &str) -> Result<Printer> {
         let parsed: Uri = uri
             .parse()
@@ -1062,12 +1219,7 @@ impl CupsClient {
         .await
     }
 
-    /// The same, against a printer identified by URI rather than by queue name.
-    ///
-    /// A queue on this daemon is addressable either way, but an IPP printer
-    /// reached directly - a driverless network printer, or one on another host
-    /// - has no local queue name to give.
-    pub async fn print_stream_at<R>(
+    pub(crate) async fn print_stream_at<R>(
         &self,
         uri: Uri,
         reader: R,
