@@ -105,3 +105,39 @@ async fn classes_are_listed_without_error() {
     eprintln!("{} classes configured", classes.len());
     assert!(classes.iter().all(|c| !c.name.is_empty()));
 }
+
+#[cfg(feature = "tls")]
+#[tokio::test]
+#[ignore = "requires a running cupsd"]
+async fn an_ipps_connection_needs_the_certificate_trusted() {
+    // CUPS serves ipps on the same port and signs it with a self-signed
+    // certificate, which is exactly what printers do. Verification must fail
+    // by default, and the caller must be able to tell why.
+    let strict = CupsClient::builder("ipps://localhost:631").build().unwrap();
+    let refused = strict.printers().await;
+
+    match refused {
+        Err(e) => assert!(
+            e.is_certificate_error(),
+            "a rejected certificate must be reported as one, got: {e}"
+        ),
+        // A machine whose CUPS certificate is in the trust store is not a
+        // failure of this crate.
+        Ok(_) => eprintln!("this daemon's certificate is already trusted"),
+    }
+}
+
+#[cfg(feature = "tls")]
+#[tokio::test]
+#[ignore = "requires a running cupsd"]
+async fn ipps_works_when_the_caller_accepts_the_certificate() {
+    // The same connection succeeds once the caller opts out of verification,
+    // which proves TLS itself works and that the only obstacle was trust.
+    let client = CupsClient::builder("ipps://localhost:631")
+        .danger_accept_invalid_certs(true)
+        .build()
+        .unwrap();
+
+    let printers = client.printers().await.expect("ipps works over TLS");
+    eprintln!("{} printers over ipps://", printers.len());
+}

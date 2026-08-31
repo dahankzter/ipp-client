@@ -9,7 +9,7 @@ mod events;
 mod lpoptions;
 mod model;
 
-pub use client::{CupsClient, IdentifyAction, PpdFilter, WhichJobs};
+pub use client::{CupsClient, CupsClientBuilder, IdentifyAction, PpdFilter, WhichJobs};
 pub use error::{Error, Result};
 pub use events::PrinterEvent;
 pub use lpoptions::{default_printer, default_printer_from};

@@ -2,8 +2,14 @@
 
 An async, pure-Rust IPP client for CUPS.
 
-No `libcups`, no bindgen, no C toolchain — it speaks the IPP protocol over HTTP
-directly, so it cross-compiles and packages like any other Rust crate.
+No `libcups` and no bindgen: it speaks the IPP protocol over HTTP directly, so
+there is no C library to install and no ABI to track.
+
+With `default-features = false` the build contains no C whatsoever. The default
+build enables TLS for `ipps://`, which brings rustls' `aws-lc-rs` provider and
+with it a vendored BoringSSL needing `cc` and `cmake` at build time - though
+still nothing at runtime. The [workspace README](../README.md) has the exact
+trade.
 
 ```rust,no_run
 # async fn example() -> cups_client::Result<()> {
