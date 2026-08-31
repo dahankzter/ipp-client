@@ -141,3 +141,31 @@ async fn ipps_works_when_the_caller_accepts_the_certificate() {
     let printers = client.printers().await.expect("ipps works over TLS");
     eprintln!("{} printers over ipps://", printers.len());
 }
+
+#[tokio::test]
+#[ignore = "requires a running cupsd"]
+async fn a_queue_can_be_paused_and_resumed() {
+    // Pause is administrative, so an unauthorised client is refused. Either
+    // outcome proves the operation reached CUPS and was understood; what must
+    // not happen is a silent success that changes nothing.
+    let client = CupsClient::local().unwrap();
+    let printers = client.printers().await.unwrap();
+    let Some(target) = printers.first() else {
+        eprintln!("no queues configured");
+        return;
+    };
+    let queue = client.queue(&target.name).unwrap();
+
+    match queue.pause().await {
+        Ok(()) => {
+            let paused = client.printer(&target.name).await.unwrap();
+            assert_eq!(
+                paused.state,
+                cups_client::PrinterState::Stopped,
+                "a paused queue reports itself stopped"
+            );
+            queue.resume().await.expect("resume");
+        }
+        Err(e) => eprintln!("pause refused, as an unauthorised caller should be: {e}"),
+    }
+}

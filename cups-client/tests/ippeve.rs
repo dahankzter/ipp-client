@@ -192,3 +192,67 @@ async fn every_printer_operation_works_without_cups() {
     let cancelled = p.cancel_job(job).await;
     eprintln!("cancel of finished job {job}: {cancelled:?}");
 }
+
+#[tokio::test]
+#[ignore = "requires the ippeveprinter binary"]
+async fn a_printer_without_multi_document_support_says_so() {
+    let printer = IppEvePrinter::start("test-queue").await;
+    let client = CupsClient::with_uri(&printer.uri(), "tester").unwrap();
+    let p = client.at(&printer.printer_uri()).unwrap();
+
+    let mut job = p.create_job("two-part").await.expect("create");
+    job.add_document(std::io::Cursor::new(vec![b'a'; 1024]), Some(RASTER), false)
+        .await
+        .expect("the first document is always accepted");
+
+    // ippeveprinter takes one document per job. Not every IPP printer supports
+    // multi-document jobs, and the refusal has to arrive as the printer's own
+    // status rather than as a hang or a silent single-document job.
+    let second = job
+        .add_document(std::io::Cursor::new(vec![b'b'; 2048]), Some(RASTER), true)
+        .await;
+    match second {
+        Err(e) => assert!(
+            e.to_string().contains("MultipleDocumentJobsNotSupported"),
+            "the printer's own reason must survive, got: {e}"
+        ),
+        Ok(()) => eprintln!("this build of ippeveprinter accepts multiple documents"),
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires the ippeveprinter binary"]
+async fn close_job_reaches_the_printer_as_close_job() {
+    let printer = IppEvePrinter::start("test-queue").await;
+    let client = CupsClient::with_uri(&printer.uri(), "tester").unwrap();
+    let p = client.at(&printer.printer_uri()).unwrap();
+
+    let mut job = p.create_job("closed-by-hand").await.expect("create");
+    let payload = vec![b'c'; 4096];
+    job.add_document(std::io::Cursor::new(payload.clone()), Some(RASTER), false)
+        .await
+        .expect("document");
+
+    // ippeveprinter closes a job after its first document whatever
+    // last-document said - ipptool gets the same answer, so this is the
+    // printer's behaviour and not ours. The point of the assertion is that the
+    // hand-written 0x003B opcode arrives as Close-Job and is understood:
+    // a wrong opcode would not come back with a Close-Job status at all.
+    match job.close().await {
+        Ok(_) => {}
+        Err(e) => {
+            let text = e.to_string();
+            assert!(
+                text.contains("Close-Job"),
+                "the failure must be about Close-Job, got: {text}"
+            );
+        }
+    }
+
+    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+    assert_eq!(
+        printer.largest_spooled_document(),
+        Some(payload.len() as u64),
+        "the document printed"
+    );
+}

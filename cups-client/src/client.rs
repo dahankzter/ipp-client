@@ -570,12 +570,146 @@ impl IppPrinter<'_> {
             .await
     }
 
+    /// Stops the printer processing jobs. Queued jobs stay queued.
+    ///
+    /// Administrative. This is what `cupsdisable` does to a CUPS queue.
+    pub async fn pause(&self) -> Result<()> {
+        self.printer_action(Operation::PausePrinter, "Pause-Printer")
+            .await
+    }
+
+    /// Starts a paused printer processing jobs again.
+    pub async fn resume(&self) -> Result<()> {
+        self.printer_action(Operation::ResumePrinter, "Resume-Printer")
+            .await
+    }
+
+    /// Opens a job that documents are added to one at a time.
+    ///
+    /// Use this to send several documents as a single job - a cover sheet and
+    /// a report that must not be separated, say. For one document,
+    /// [`IppPrinter::print_stream`] does the same thing in fewer round trips.
+    ///
+    /// The job stays open, and occupies the printer, until
+    /// [`IppJob::close`] is called or the last document is marked as such.
+    pub async fn create_job(&self, job_name: &str) -> Result<IppJob<'_>> {
+        let op = CreateJob::new(self.uri.clone(), Some(job_name)).map_err(Error::transport)?;
+        let resp = self.client.send(op, "Create-Job").await?;
+        let id = CupsClient::decode_job_id(&resp)?;
+
+        Ok(IppJob {
+            printer: self,
+            id,
+            closed: false,
+        })
+    }
+
+    async fn printer_action(&self, operation: Operation, label: &str) -> Result<()> {
+        let mut request =
+            IppRequestResponse::new(IppVersion::v1_1(), operation, Some(self.uri.clone()))
+                .map_err(Error::transport)?;
+        request.attributes_mut().add(
+            DelimiterTag::OperationAttributes,
+            IppAttribute::with_name(
+                "requesting-user-name",
+                IppValue::NameWithoutLanguage(
+                    self.client
+                        .user
+                        .as_str()
+                        .try_into()
+                        .map_err(|_| Error::decode("requesting-user-name", "name too long"))?,
+                ),
+            )
+            .map_err(|e| Error::decode("requesting-user-name", e.to_string()))?,
+        );
+        self.client.send(request, label).await?;
+        Ok(())
+    }
+
     async fn job_action(&self, operation: Operation, label: &str, id: JobId) -> Result<()> {
         let request = self
             .client
             .job_action_request(operation, self.uri.clone(), id)?;
         self.client.send(request, label).await?;
         Ok(())
+    }
+}
+
+/// A job open for documents, created by [`IppPrinter::create_job`].
+///
+/// Dropping one without closing it leaves the job open on the printer, where
+/// it will occupy the queue until the printer's own timeout expires. Call
+/// [`IppJob::close`], or mark the final document as last.
+pub struct IppJob<'a> {
+    printer: &'a IppPrinter<'a>,
+    id: JobId,
+    closed: bool,
+}
+
+impl IppJob<'_> {
+    /// The job's id, as assigned by the printer.
+    pub fn id(&self) -> JobId {
+        self.id
+    }
+
+    /// Adds a document to the job.
+    ///
+    /// Set `last` on the final document, which closes the job in the same
+    /// request and saves a round trip over calling [`IppJob::close`].
+    pub async fn add_document<R>(
+        &mut self,
+        reader: R,
+        document_format: Option<&str>,
+        last: bool,
+    ) -> Result<()>
+    where
+        R: tokio::io::AsyncRead + Send + Unpin + 'static,
+    {
+        use tokio_util::compat::TokioAsyncReadCompatExt;
+
+        let op = SendDocument::new(
+            self.printer.uri.clone(),
+            self.id,
+            IppPayload::new_async(reader.compat()),
+            Some(self.printer.client.user.as_str()),
+            document_format,
+            last,
+        )
+        .map_err(Error::transport)?;
+
+        self.printer.client.send(op, "Send-Document").await?;
+        if last {
+            self.closed = true;
+        }
+        Ok(())
+    }
+
+    /// Closes the job, so the printer stops waiting for documents and starts
+    /// printing.
+    ///
+    /// Not needed when the last document was added with `last` set.
+    pub async fn close(mut self) -> Result<JobId> {
+        if self.closed {
+            return Ok(self.id);
+        }
+
+        let mut request = self.printer.client.job_action_request(
+            // The ipp crate's Operation enum has no Close-Job, so the opcode
+            // is written directly, as for Identify-Printer.
+            Operation::CancelJob,
+            self.printer.uri.clone(),
+            self.id,
+        )?;
+        request.header_mut().operation_or_status = CLOSE_JOB;
+
+        self.printer.client.send(request, "Close-Job").await?;
+        self.closed = true;
+        Ok(self.id)
+    }
+
+    /// Abandons the job, removing it from the printer.
+    pub async fn cancel(self) -> Result<()> {
+        self.printer.cancel_job(self.id).await
     }
 }
 
@@ -690,8 +824,9 @@ fn default_user() -> String {
     std::env::var("USER").unwrap_or_else(|_| "anonymous".to_string())
 }
 
-/// IPP `Identify-Printer`, which the `ipp` crate's `Operation` enum predates.
+/// IPP operations the `ipp` crate's `Operation` enum predates.
 const IDENTIFY_PRINTER: i16 = 0x003C;
+const CLOSE_JOB: i16 = 0x003B;
 
 /// How a printer should announce itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
