@@ -10,6 +10,21 @@ repository.workspace = true
 readme = "README.md"
 rust-version = "1.93"
 
+[features]
+# TLS is on by default because `ipps://` is what driverless printers advertise.
+#
+# It is separable because it is the one thing here that is not pure Rust:
+# rustls' default crypto provider is aws-lc-rs, which vendors and compiles a
+# BoringSSL fork, so enabling it puts `cc` and `cmake` in the build graph. That
+# is still a world away from linking libcups or a system libssl - nothing is
+# needed at runtime and there is no `-dev` package to install - but it does mean
+# a C compiler is needed to build.
+#
+# `default-features = false` gives a build with no C anywhere, at the cost of
+# `ipps://`. Everything else works unchanged.
+default = ["tls"]
+tls = ["ipp/async-client-rustls"]
+
 [dependencies]
 ipp.workspace = true
 futures.workspace = true
@@ -22,3 +37,8 @@ async-stream = "0.3"
 
 [dev-dependencies]
 tokio = { version = "1.49", default-features = false, features = ["macros", "rt"] }
+criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "decode"
+harness = false

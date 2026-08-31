@@ -51,6 +51,21 @@ jobs:
       - uses: taiki-e/install-action@nextest
       - name: test
         run: cargo nextest run --workspace
+      # The point of the tls feature is that turning it off gives a build with
+      # no C in it. That only stays true if something checks.
+      - name: test without tls
+        run: cargo nextest run -p cups-client --no-default-features
+      - name: no C in the default-features-off build
+        run: |
+          set -e
+          offenders=$(cargo tree -p cups-client --no-default-features -e normal,build --prefix none \
+            | sed 's/ v[0-9].*//' | sort -u | grep -E 'sys$|^cc$|^cmake$' || true)
+          if [ -n "$offenders" ]; then
+            echo "C dependencies leaked into the pure build:"
+            echo "$offenders"
+            exit 1
+          fi
+          echo "no C dependencies"
       # nextest does not run doctests. There are none today, and this is what
       # stops one being added later and silently never running.
       - name: doctests

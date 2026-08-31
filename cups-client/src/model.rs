@@ -3,16 +3,24 @@
 use crate::{Error, Result};
 use tracing::warn;
 
+/// A job's identifier, unique per printer and assigned on submission.
 pub type JobId = i32;
 
+/// What a printer is doing, from IPP `printer-state`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrinterState {
+    /// Accepting work and not currently printing.
     Idle,
+    /// Working through a job.
     Processing,
+    /// Not printing, and will not start until something changes. The reason is
+    /// in [`Printer::reasons`] - out of paper, a jam, or deliberately paused.
     Stopped,
 }
 
 impl PrinterState {
+    /// Reads the IPP enum value. Unknown values are an error rather than a
+    /// guess, since treating an unrecognised state as idle would be a lie.
     pub fn from_ipp(value: i32) -> Result<Self> {
         match value {
             3 => Ok(PrinterState::Idle),
@@ -26,18 +34,28 @@ impl PrinterState {
     }
 }
 
+/// Where a job has got to, from IPP `job-state`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobState {
+    /// Queued, waiting its turn.
     Pending,
+    /// Held back until released, by [`crate::IppPrinter::release_job`] or by
+    /// whatever held it.
     PendingHeld,
+    /// Being printed now.
     Processing,
+    /// Started, then interrupted - the printer stopped under it.
     ProcessingStopped,
+    /// Cancelled by someone.
     Canceled,
+    /// Given up on by the printer, rather than cancelled.
     Aborted,
+    /// Finished.
     Completed,
 }
 
 impl JobState {
+    /// Reads the IPP enum value, rejecting anything unrecognised.
     pub fn from_ipp(value: i32) -> Result<Self> {
         match value {
             3 => Ok(JobState::Pending),
@@ -63,20 +81,36 @@ impl JobState {
     }
 }
 
+/// How much a state reason matters. Ordered, so the worst of a set is its
+/// maximum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Severity {
+    /// Worth knowing, but nothing is wrong.
     Report,
+    /// Printing continues, but something needs attention soon - ink low.
     Warning,
+    /// Printing has stopped or will fail - out of paper, a jam, a door open.
     Error,
 }
 
+/// One reason a printer or job is in the state it is in.
+///
+/// IPP carries these as keywords with an optional severity suffix, as in
+/// `media-empty-error`. The suffix is split off into [`StateReason::severity`]
+/// so the keyword can be matched on without worrying about which of the three
+/// forms a given printer used.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateReason {
+    /// The reason itself, with any severity suffix removed - `media-empty`,
+    /// `toner-low`, `cover-open`.
     pub keyword: String,
+    /// How serious it is. Reasons with no suffix are reported as
+    /// [`Severity::Report`].
     pub severity: Severity,
 }
 
 impl StateReason {
+    /// Splits one raw `*-state-reasons` keyword into reason and severity.
     pub fn parse(raw: &str) -> Self {
         for (suffix, severity) in [
             ("-error", Severity::Error),
@@ -105,6 +139,7 @@ impl StateReason {
     }
 }
 
+/// How full a supply is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SupplyLevel {
     /// A percentage in 0..=100.
@@ -113,12 +148,20 @@ pub enum SupplyLevel {
     Unknown,
 }
 
+/// One consumable the printer reports a level for: a cartridge, a drum, a
+/// waste tank.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Supply {
+    /// The printer's own name for it, such as `Black Cartridge`.
     pub name: String,
+    /// What kind of supply it is - `toner`, `ink`, `wasteToner` - where the
+    /// printer says.
     pub kind: Option<String>,
+    /// Its colour as an sRGB hex string, where the printer says.
     pub colour: Option<String>,
+    /// How much is left.
     pub level: SupplyLevel,
+    /// The level at or below which the printer considers this supply low.
     pub low_threshold: Option<i32>,
 }
 
@@ -165,20 +208,36 @@ impl Supply {
 use crate::attrs::Attrs;
 use ipp::prelude::IppAttributeGroup;
 
+/// A printer, as it describes itself.
+///
+/// Whether this is a CUPS queue or a printer reached directly makes no
+/// difference to the shape: both answer `Get-Printer-Attributes`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Printer {
+    /// The queue or printer name.
     pub name: String,
+    /// The printer's own address, from `printer-uri-supported`. This is what
+    /// [`crate::CupsClient::at`] takes to address it directly.
     pub uri: String,
     /// The backend URI CUPS prints through, e.g.
     /// `ipps://HP%20OfficeJet._ipps._tcp.local/`. Distinct from `uri`, which is
     /// the queue's own address on this machine. Empty when CUPS does not say.
     pub device_uri: String,
+    /// The human description, as set by whoever configured it.
     pub info: Option<String>,
+    /// Where it physically is, as set by whoever configured it.
     pub location: Option<String>,
+    /// What it is doing now.
     pub state: PrinterState,
+    /// Why it is in that state. Empty when there is nothing to say.
     pub reasons: Vec<StateReason>,
+    /// Whether new jobs are being taken. A printer can be stopped and still
+    /// accepting, which is how work queues up while paper is replaced.
     pub accepting_jobs: bool,
+    /// Consumable levels, where reported. CUPS caches these only after a job
+    /// has run, so a freshly added queue reports none.
     pub supplies: Vec<Supply>,
+    /// Whether this is the daemon's default destination.
     pub is_default: bool,
     /// Job option defaults the queue advertises.
     pub options: PrinterOptions,
@@ -187,8 +246,11 @@ pub struct Printer {
 /// Print quality, from the IPP `print-quality` enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrintQuality {
+    /// Fastest, lowest quality.
     Draft,
+    /// The printer's usual quality.
     Normal,
+    /// Slowest, best quality.
     High,
 }
 
@@ -204,6 +266,7 @@ impl PrintQuality {
         }
     }
 
+    /// The IPP enum value to send back.
     pub fn to_ipp(self) -> i32 {
         match self {
             PrintQuality::Draft => 3,
@@ -219,7 +282,9 @@ impl PrintQuality {
 /// every printer offers every option.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OptionValues<T> {
+    /// Every value the queue says it accepts, in the order it listed them.
     pub supported: Vec<T>,
+    /// The value currently in effect for new jobs.
     pub default: Option<T>,
 }
 
@@ -246,10 +311,16 @@ impl<T> OptionValues<T> {
 /// express: rendering an arbitrary option tree well is its own project.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PrinterOptions {
+    /// Page sizes, as PWG self-describing names. See [`MediaSize`].
     pub media: OptionValues<String>,
+    /// One- or two-sided, as `one-sided`, `two-sided-long-edge`,
+    /// `two-sided-short-edge`.
     pub sides: OptionValues<String>,
+    /// Colour or monochrome, as `color` and `monochrome`.
     pub color_mode: OptionValues<String>,
+    /// Print quality.
     pub quality: OptionValues<PrintQuality>,
+    /// Output tray, as `face-up`, `face-down` and vendor-specific names.
     pub output_bin: OptionValues<String>,
 }
 
@@ -294,12 +365,14 @@ impl PrinterOptions {
 /// class is which queues belong to it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Class {
+    /// The class name, which is addressed exactly like a printer name.
     pub name: String,
     /// The queues in this class, in the order CUPS lists them.
     pub members: Vec<String>,
 }
 
 impl Class {
+    /// Reads a class from an IPP printer-attributes group.
     pub fn decode(group: &IppAttributeGroup) -> Result<Class> {
         let a = Attrs::new(group);
         Ok(Class {
@@ -321,6 +394,7 @@ pub struct Ppd {
 }
 
 impl Ppd {
+    /// Reads a driver from an IPP printer-attributes group.
     pub fn decode(group: &IppAttributeGroup) -> Result<Ppd> {
         let a = Attrs::new(group);
         Ok(Ppd {
@@ -337,7 +411,12 @@ impl Ppd {
 pub struct MediaSize {
     /// The original keyword, which is what CUPS wants set back.
     pub keyword: String,
+    /// The naming authority: `iso`, `na`, `jis`, `om` for vendor-defined,
+    /// `custom` for the range markers that are not selectable sizes.
     pub class: String,
+    /// The vendor's name for the size, such as `a4` or `letter`. Varies
+    /// between printers for the same physical size, which is why
+    /// [`MediaSize::dimensions`] is what should be compared.
     pub name: String,
     /// The dimension suffix, e.g. `210x297mm`.
     ///
@@ -345,6 +424,7 @@ pub struct MediaSize {
     /// varies by vendor - `a4` against `a-4`, `hagaki` against `postcard` - so
     /// this is the only reliable way to pair them.
     pub dimensions: String,
+    /// Whether this is the borderless variant of the size.
     pub borderless: bool,
 }
 
@@ -367,6 +447,7 @@ impl MediaSize {
 }
 
 impl Printer {
+    /// Reads a printer from an IPP printer-attributes group.
     pub fn decode(group: &IppAttributeGroup) -> Result<Printer> {
         let a = Attrs::new(group);
 
@@ -407,11 +488,15 @@ impl Printer {
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// How far through a job the printer has got.
 pub enum JobProgress {
     /// CUPS did not report a page count. Render an indeterminate bar.
     Indeterminate,
+    /// A known page count.
     Pages {
+        /// Pages printed so far.
         done: i32,
+        /// Pages in the job.
         total: i32,
     },
 }
@@ -429,15 +514,25 @@ impl JobProgress {
     }
 }
 
+/// A print job.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Job {
+    /// The job's id on its printer.
     pub id: JobId,
+    /// The printer or queue it was submitted to.
     pub printer: String,
+    /// The document name, where one was given. CUPS discards this once a job
+    /// finishes, so a completed job usually has none.
     pub name: Option<String>,
+    /// Who submitted it. Discarded on completion, like the name.
     pub user: Option<String>,
+    /// Where the job has got to.
     pub state: JobState,
+    /// Why, where the printer says.
     pub reasons: Vec<StateReason>,
+    /// Page progress, where the printer reports it.
     pub progress: JobProgress,
+    /// When it was submitted.
     pub created: Option<SystemTime>,
     /// Pages actually printed, when CUPS reports it.
     ///
@@ -463,6 +558,7 @@ pub fn printer_name_from_uri(uri: &str) -> Option<String> {
 }
 
 impl Job {
+    /// Reads a job from an IPP job-attributes group.
     pub fn decode(group: &IppAttributeGroup) -> Result<Job> {
         let a = Attrs::new(group);
 

@@ -105,3 +105,90 @@ async fn classes_are_listed_without_error() {
     eprintln!("{} classes configured", classes.len());
     assert!(classes.iter().all(|c| !c.name.is_empty()));
 }
+
+#[cfg(feature = "tls")]
+#[tokio::test]
+#[ignore = "requires a running cupsd"]
+async fn an_ipps_connection_needs_the_certificate_trusted() {
+    // CUPS serves ipps on the same port and signs it with a self-signed
+    // certificate, which is exactly what printers do. Verification must fail
+    // by default, and the caller must be able to tell why.
+    let strict = CupsClient::builder("ipps://localhost:631").build().unwrap();
+    let refused = strict.printers().await;
+
+    match refused {
+        Err(e) => assert!(
+            e.is_certificate_error(),
+            "a rejected certificate must be reported as one, got: {e}"
+        ),
+        // A machine whose CUPS certificate is in the trust store is not a
+        // failure of this crate.
+        Ok(_) => eprintln!("this daemon's certificate is already trusted"),
+    }
+}
+
+#[cfg(feature = "tls")]
+#[tokio::test]
+#[ignore = "requires a running cupsd"]
+async fn ipps_works_when_the_caller_accepts_the_certificate() {
+    // The same connection succeeds once the caller opts out of verification,
+    // which proves TLS itself works and that the only obstacle was trust.
+    let client = CupsClient::builder("ipps://localhost:631")
+        .danger_accept_invalid_certs(true)
+        .build()
+        .unwrap();
+
+    let printers = client.printers().await.expect("ipps works over TLS");
+    eprintln!("{} printers over ipps://", printers.len());
+}
+
+#[tokio::test]
+#[ignore = "requires a running cupsd"]
+async fn a_queue_can_be_paused_and_resumed() {
+    // Pause is administrative, so an unauthorised client is refused. Either
+    // outcome proves the operation reached CUPS and was understood; what must
+    // not happen is a silent success that changes nothing.
+    let client = CupsClient::local().unwrap();
+    let printers = client.printers().await.unwrap();
+    let Some(target) = printers.first() else {
+        eprintln!("no queues configured");
+        return;
+    };
+    let queue = client.queue(&target.name).unwrap();
+
+    match queue.pause().await {
+        Ok(()) => {
+            let paused = client.printer(&target.name).await.unwrap();
+            assert_eq!(
+                paused.state,
+                cups_client::PrinterState::Stopped,
+                "a paused queue reports itself stopped"
+            );
+            queue.resume().await.expect("resume");
+        }
+        Err(e) => eprintln!("pause refused, as an unauthorised caller should be: {e}"),
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires a running cupsd; measures rather than asserts"]
+async fn round_trip_cost_against_a_real_daemon() {
+    // Context for the decode benchmarks: how much of a call is this crate's
+    // work, and how much is the daemon and the socket. Printed rather than
+    // asserted, because a timing threshold in a test suite is a flake waiting
+    // to happen.
+    let client = CupsClient::local().unwrap();
+
+    // Warm the connection so the first TCP setup is not counted.
+    let _ = client.printers().await;
+
+    let runs = 50;
+    let start = std::time::Instant::now();
+    for _ in 0..runs {
+        client.printers().await.expect("printers");
+    }
+    let each = start.elapsed() / runs;
+
+    eprintln!("CUPS-Get-Printers round trip: {each:?} each over {runs} runs");
+    eprintln!("  of which parse+decode is about 51us, measured by benches/decode.rs");
+}

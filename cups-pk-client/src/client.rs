@@ -201,7 +201,9 @@ pub struct PrinterSpec {
     pub uri: String,
     /// A PPD name, or `"everywhere"` for driverless IPP.
     pub ppd: String,
+    /// A human description for the new queue. May be empty.
     pub info: String,
+    /// Where the printer is. May be empty.
     pub location: String,
 }
 

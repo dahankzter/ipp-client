@@ -31,14 +31,58 @@ pub struct CupsClient {
 impl CupsClient {
     /// Connects to the local CUPS daemon as the current user.
     pub fn local() -> Result<Self> {
-        let user = std::env::var("USER").unwrap_or_else(|_| "anonymous".to_string());
-        Self::with_uri(LOCAL_CUPS, &user)
+        Self::with_uri(LOCAL_CUPS, &default_user())
     }
 
+    /// A handle to any IPP printer, by URI.
+    ///
+    /// The printer needs no relationship to the daemon this client points at:
+    /// this is how to reach a driverless network printer directly, with no
+    /// CUPS in the path.
+    pub fn at(&self, uri: &str) -> Result<IppPrinter<'_>> {
+        let parsed: Uri = uri
+            .parse()
+            .map_err(|e| Error::transport_msg(format!("bad printer uri {uri}: {e}")))?;
+        Ok(IppPrinter {
+            client: self,
+            uri: parsed,
+        })
+    }
+
+    /// A handle to a queue on the CUPS daemon this client is connected to.
+    ///
+    /// A convenience over [`CupsClient::at`] that knows CUPS' URI convention,
+    /// so a queue can be named rather than spelled out.
+    pub fn queue(&self, name: &str) -> Result<IppPrinter<'_>> {
+        Ok(IppPrinter {
+            client: self,
+            uri: self.printer_uri(name)?,
+        })
+    }
+
+    /// Starts building a client with options the plain constructors do not take.
+    ///
+    /// ```no_run
+    /// # fn main() -> cups_client::Result<()> {
+    /// // A printer's own certificate is normally self-signed, so pin it
+    /// // rather than turning verification off.
+    /// let client = cups_client::CupsClient::builder("ipps://printer.local:631")
+    ///     .user("alice")
+    ///     .ca_cert(std::fs::read("printer.pem")?)
+    ///     .build()?;
+    /// # Ok(()) }
+    /// ```
+    pub fn builder(uri: &str) -> CupsClientBuilder {
+        CupsClientBuilder::new(uri)
+    }
+
+    /// Connects to an IPP endpoint, attributing jobs to `user`.
+    ///
+    /// For TLS trust, credentials or timeouts, use [`CupsClient::builder`].
     pub fn with_uri(uri: &str, user: &str) -> Result<Self> {
         let parsed: Uri = uri
             .parse()
-            .map_err(|e| Error::Transport(format!("bad CUPS uri {uri}: {e}")))?;
+            .map_err(|e| Error::transport_msg(format!("bad CUPS uri {uri}: {e}")))?;
 
         Ok(CupsClient {
             inner: AsyncIppClient::new(parsed),
@@ -52,7 +96,7 @@ impl CupsClient {
     pub(crate) fn printer_uri(&self, name: &str) -> Result<Uri> {
         format!("{}/printers/{name}", self.base)
             .parse()
-            .map_err(|e| Error::Transport(format!("bad printer uri for {name}: {e}")))
+            .map_err(|e| Error::transport_msg(format!("bad printer uri for {name}: {e}")))
     }
 
     pub(crate) async fn send(
@@ -64,7 +108,7 @@ impl CupsClient {
             .inner
             .send(req.into())
             .await
-            .map_err(|e| Error::Transport(e.to_string()))?;
+            .map_err(Error::transport)?;
         Self::check_status(&resp, label)?;
         Ok(resp)
     }
@@ -124,15 +168,27 @@ impl CupsClient {
             .collect()
     }
 
+    /// The default-printer cache, surviving a poisoned lock.
+    ///
+    /// The cache is an optimisation, not state anything depends on, so a panic
+    /// in another thread must not turn every later call into a panic of its
+    /// own. The stored value is unaffected by whatever went wrong elsewhere.
+    fn cache_lock(&self) -> std::sync::MutexGuard<'_, Option<Option<String>>> {
+        self.default_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// The server's own default queue, via `CUPS-Get-Default`.
     pub(crate) async fn server_default(&self) -> Result<Option<String>> {
         let mut request =
             IppRequestResponse::new(IppVersion::v1_1(), Operation::CupsGetDefault, None)
-                .map_err(|e| Error::Transport(e.to_string()))?;
+                .map_err(Error::transport)?;
         request.attributes_mut().add(
             DelimiterTag::OperationAttributes,
             IppAttribute::with_name(
                 "requested-attributes",
+                // Infallible: a 12-byte literal is inside the keyword bound.
                 IppValue::Keyword("printer-name".try_into().unwrap()),
             )
             .map_err(|e| Error::decode("requested-attributes", e.to_string()))?,
@@ -154,7 +210,7 @@ impl CupsClient {
     /// `lpoptions` file. Call `invalidate_default_printer_cache` to force a
     /// fresh lookup (the poll loop does this on every resynchronisation).
     pub async fn default_printer(&self) -> Option<String> {
-        if let Some(cached) = self.default_cache.lock().unwrap().clone() {
+        if let Some(cached) = self.cache_lock().clone() {
             return cached;
         }
 
@@ -169,14 +225,14 @@ impl CupsClient {
             },
         };
 
-        *self.default_cache.lock().unwrap() = Some(resolved.clone());
+        *self.cache_lock() = Some(resolved.clone());
         resolved
     }
 
     /// Forces the next `default_printer` call to resolve again instead of
     /// reusing the cached value.
     pub(crate) fn invalidate_default_printer_cache(&self) {
-        *self.default_cache.lock().unwrap() = None;
+        *self.cache_lock() = None;
     }
 
     /// Attributes `Printer::decode` needs. Without this, `CUPS-Get-Printers`
@@ -216,11 +272,7 @@ impl CupsClient {
         let mut request = CupsGetPrinters::new().into_ipp_request();
         Self::request_attributes(&mut request, Self::PRINTER_ATTRIBUTES)?;
 
-        let resp = self
-            .inner
-            .send(request)
-            .await
-            .map_err(|e| Error::Transport(e.to_string()))?;
+        let resp = self.inner.send(request).await.map_err(Error::transport)?;
         Self::check_status(&resp, "CUPS-Get-Printers")?;
 
         Ok(Self::decode_printers(&resp, default.as_deref()))
@@ -258,10 +310,9 @@ impl CupsClient {
         let root: Uri = self
             .base
             .parse()
-            .map_err(|e| Error::Transport(format!("bad CUPS uri: {e}")))?;
+            .map_err(|e| Error::transport_msg(format!("bad CUPS uri: {e}")))?;
 
-        let op = GetJobs::new(root, Some(self.user.clone()))
-            .map_err(|e| Error::Transport(e.to_string()))?;
+        let op = GetJobs::new(root, Some(self.user.clone())).map_err(Error::transport)?;
 
         let mut request = op.into_ipp_request();
         Self::request_attributes(&mut request, Self::JOB_ATTRIBUTES)?;
@@ -296,14 +347,10 @@ impl CupsClient {
     pub async fn classes(&self) -> Result<Vec<Class>> {
         let mut request =
             IppRequestResponse::new(IppVersion::v1_1(), Operation::CupsGetClasses, None)
-                .map_err(|e| Error::Transport(e.to_string()))?;
+                .map_err(Error::transport)?;
         Self::request_attributes(&mut request, &["printer-name", "member-names"])?;
 
-        let resp = self
-            .inner
-            .send(request)
-            .await
-            .map_err(|e| Error::Transport(e.to_string()))?;
+        let resp = self.inner.send(request).await.map_err(Error::transport)?;
         Self::check_status(&resp, "CUPS-Get-Classes")?;
 
         Ok(resp
@@ -328,7 +375,7 @@ impl CupsClient {
     /// does - so verify against `ipptool` rather than `lpinfo`.
     pub async fn ppds(&self, filter: Option<PpdFilter<'_>>) -> Result<Vec<Ppd>> {
         let mut request = IppRequestResponse::new(IppVersion::v1_1(), Operation::CupsGetPPDs, None)
-            .map_err(|e| Error::Transport(e.to_string()))?;
+            .map_err(Error::transport)?;
 
         if let Some(filter) = filter {
             let (name, value) = filter.as_attribute();
@@ -350,11 +397,7 @@ impl CupsClient {
             &["ppd-name", "ppd-make-and-model", "ppd-device-id"],
         )?;
 
-        let resp = self
-            .inner
-            .send(request)
-            .await
-            .map_err(|e| Error::Transport(e.to_string()))?;
+        let resp = self.inner.send(request).await.map_err(Error::transport)?;
         Self::check_status(&resp, "CUPS-Get-PPDs")?;
 
         Ok(resp
@@ -374,11 +417,7 @@ impl CupsClient {
     pub async fn jobs(&self, which: WhichJobs) -> Result<Vec<Job>> {
         let request = self.jobs_request(which)?;
 
-        let resp = self
-            .inner
-            .send(request)
-            .await
-            .map_err(|e| Error::Transport(e.to_string()))?;
+        let resp = self.inner.send(request).await.map_err(Error::transport)?;
         Self::check_status(&resp, "Get-Jobs")?;
 
         Ok(Self::decode_jobs(&resp))
@@ -388,8 +427,8 @@ impl CupsClient {
     pub(crate) fn job_request(&self, printer: &str, id: JobId) -> Result<IppRequestResponse> {
         let uri = self.printer_uri(printer)?;
 
-        let op = GetJobAttributes::new(uri, id, Some(self.user.clone()))
-            .map_err(|e| Error::Transport(e.to_string()))?;
+        let op =
+            GetJobAttributes::new(uri, id, Some(self.user.clone())).map_err(Error::transport)?;
 
         let mut request = op.into_ipp_request();
         Self::request_attributes(&mut request, Self::JOB_ATTRIBUTES)?;
@@ -411,11 +450,7 @@ impl CupsClient {
     pub async fn job(&self, printer: &str, id: JobId) -> Result<Option<Job>> {
         let request = self.job_request(printer, id)?;
 
-        let resp = self
-            .inner
-            .send(request)
-            .await
-            .map_err(|e| Error::Transport(e.to_string()))?;
+        let resp = self.inner.send(request).await.map_err(Error::transport)?;
 
         // A job aged out of the history is a normal outcome, not a failure.
         if resp.header().status_code() == StatusCode::ClientErrorNotFound {
@@ -427,8 +462,430 @@ impl CupsClient {
     }
 }
 
-/// IPP `Identify-Printer`, which the `ipp` crate's `Operation` enum predates.
+/// One printer, addressed by its own URI.
+///
+/// Every operation here is standard IPP, so the printer at the other end can
+/// be a CUPS queue, a driverless network printer, or anything else that speaks
+/// the protocol. Obtain one with [`CupsClient::at`] for an arbitrary printer,
+/// or [`CupsClient::queue`] for a queue on the CUPS daemon this client is
+/// connected to.
+///
+/// ```no_run
+/// # async fn example() -> cups_client::Result<()> {
+/// let client = cups_client::CupsClient::local()?;
+///
+/// // A queue on the local daemon.
+/// let queue = client.queue("Office-Laser")?;
+/// println!("{:?}", queue.attributes().await?.state);
+///
+/// // A printer with no CUPS involved at all.
+/// let direct = client.at("ipp://printer.local/ipp/print")?;
+/// direct.identify(cups_client::IdentifyAction::Flash).await?;
+/// # Ok(()) }
+/// ```
+pub struct IppPrinter<'a> {
+    client: &'a CupsClient,
+    uri: Uri,
+}
+
+impl IppPrinter<'_> {
+    /// The printer's URI.
+    pub fn uri(&self) -> &Uri {
+        &self.uri
+    }
+
+    /// Everything the printer reports about itself: state, reasons, supply
+    /// levels and the job defaults it advertises.
+    pub async fn attributes(&self) -> Result<Printer> {
+        let op = GetPrinterAttributes::new(self.uri.clone()).map_err(Error::transport)?;
+        let resp = self.client.send(op, "Get-Printer-Attributes").await?;
+
+        resp.attributes()
+            .groups_of(DelimiterTag::PrinterAttributes)
+            .next()
+            .ok_or_else(|| Error::decode("printer-attributes", "no printer group in response"))
+            .and_then(Printer::decode)
+    }
+
+    /// Submits a document read from a stream, without holding it in memory.
+    ///
+    /// See [`CupsClient::print_stream`] for why this uses `Create-Job` and
+    /// `Send-Document` rather than `Print-Job`.
+    pub async fn print_stream<R>(
+        &self,
+        reader: R,
+        document_format: Option<&str>,
+        job_name: &str,
+    ) -> Result<JobId>
+    where
+        R: tokio::io::AsyncRead + Send + Unpin + 'static,
+    {
+        self.client
+            .print_stream_at(self.uri.clone(), reader, document_format, job_name)
+            .await
+    }
+
+    /// Submits a file, letting the printer or daemon type it.
+    pub async fn print_file(&self, path: &std::path::Path) -> Result<JobId> {
+        let job_name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "document".to_string());
+        let file = tokio::fs::File::open(path).await?;
+        self.print_stream(file, Some("application/octet-stream"), &job_name)
+            .await
+    }
+
+    /// Cancels a job on this printer.
+    pub async fn cancel_job(&self, id: JobId) -> Result<()> {
+        self.job_action(Operation::CancelJob, "Cancel-Job", id)
+            .await
+    }
+
+    /// Holds a job on this printer.
+    pub async fn hold_job(&self, id: JobId) -> Result<()> {
+        self.job_action(Operation::HoldJob, "Hold-Job", id).await
+    }
+
+    /// Releases a held job on this printer.
+    pub async fn release_job(&self, id: JobId) -> Result<()> {
+        self.job_action(Operation::ReleaseJob, "Release-Job", id)
+            .await
+    }
+
+    /// Reprints a finished job, where the document is still held.
+    pub async fn restart_job(&self, id: JobId) -> Result<()> {
+        self.job_action(Operation::RestartJob, "Restart-Job", id)
+            .await
+    }
+
+    /// Removes every job from this printer, including other users' jobs.
+    ///
+    /// Administrative: an unauthorised caller is refused rather than ignored.
+    pub async fn purge_jobs(&self) -> Result<()> {
+        let op = PurgeJobs::new(self.uri.clone(), Some(self.client.user.as_str()))
+            .map_err(Error::transport)?;
+        self.client.send(op, "Purge-Jobs").await?;
+        Ok(())
+    }
+
+    /// Asks whether a job in this format would be accepted, without sending
+    /// one. Worth doing before a long upload.
+    pub async fn validate(&self, document_format: &str) -> Result<()> {
+        self.client
+            .validate_job_at(self.uri.clone(), document_format)
+            .await
+    }
+
+    /// Makes the printer announce itself, so it can be told apart from an
+    /// identical one nearby.
+    pub async fn identify(&self, action: IdentifyAction) -> Result<()> {
+        self.client
+            .identify_printer_at(self.uri.clone(), action)
+            .await
+    }
+
+    /// Stops the printer processing jobs. Queued jobs stay queued.
+    ///
+    /// Administrative. This is what `cupsdisable` does to a CUPS queue.
+    pub async fn pause(&self) -> Result<()> {
+        self.printer_action(Operation::PausePrinter, "Pause-Printer")
+            .await
+    }
+
+    /// Starts a paused printer processing jobs again.
+    pub async fn resume(&self) -> Result<()> {
+        self.printer_action(Operation::ResumePrinter, "Resume-Printer")
+            .await
+    }
+
+    /// Opens a job that documents are added to one at a time.
+    ///
+    /// Use this to send several documents as a single job - a cover sheet and
+    /// a report that must not be separated, say. For one document,
+    /// [`IppPrinter::print_stream`] does the same thing in fewer round trips.
+    ///
+    /// The job stays open, and occupies the printer, until
+    /// [`IppJob::close`] is called or the last document is marked as such.
+    pub async fn create_job(&self, job_name: &str) -> Result<IppJob<'_>> {
+        let op = CreateJob::new(self.uri.clone(), Some(job_name)).map_err(Error::transport)?;
+        let resp = self.client.send(op, "Create-Job").await?;
+        let id = CupsClient::decode_job_id(&resp)?;
+
+        Ok(IppJob {
+            printer: self,
+            id,
+            closed: false,
+        })
+    }
+
+    async fn printer_action(&self, operation: Operation, label: &str) -> Result<()> {
+        let mut request =
+            IppRequestResponse::new(IppVersion::v1_1(), operation, Some(self.uri.clone()))
+                .map_err(Error::transport)?;
+        request.attributes_mut().add(
+            DelimiterTag::OperationAttributes,
+            IppAttribute::with_name(
+                "requesting-user-name",
+                IppValue::NameWithoutLanguage(
+                    self.client
+                        .user
+                        .as_str()
+                        .try_into()
+                        .map_err(|_| Error::decode("requesting-user-name", "name too long"))?,
+                ),
+            )
+            .map_err(|e| Error::decode("requesting-user-name", e.to_string()))?,
+        );
+        self.client.send(request, label).await?;
+        Ok(())
+    }
+
+    async fn job_action(&self, operation: Operation, label: &str, id: JobId) -> Result<()> {
+        let request = self
+            .client
+            .job_action_request(operation, self.uri.clone(), id)?;
+        self.client.send(request, label).await?;
+        Ok(())
+    }
+}
+
+/// A job open for documents, created by [`IppPrinter::create_job`].
+///
+/// Dropping one without closing it leaves the job open on the printer, where
+/// it will occupy the queue until the printer's own timeout expires. Call
+/// [`IppJob::close`], or mark the final document as last.
+pub struct IppJob<'a> {
+    printer: &'a IppPrinter<'a>,
+    id: JobId,
+    closed: bool,
+}
+
+impl IppJob<'_> {
+    /// The job's id, as assigned by the printer.
+    pub fn id(&self) -> JobId {
+        self.id
+    }
+
+    /// Adds a document to the job.
+    ///
+    /// Set `last` on the final document, which closes the job in the same
+    /// request and saves a round trip over calling [`IppJob::close`].
+    pub async fn add_document<R>(
+        &mut self,
+        reader: R,
+        document_format: Option<&str>,
+        last: bool,
+    ) -> Result<()>
+    where
+        R: tokio::io::AsyncRead + Send + Unpin + 'static,
+    {
+        use tokio_util::compat::TokioAsyncReadCompatExt;
+
+        let op = SendDocument::new(
+            self.printer.uri.clone(),
+            self.id,
+            IppPayload::new_async(reader.compat()),
+            Some(self.printer.client.user.as_str()),
+            document_format,
+            last,
+        )
+        .map_err(Error::transport)?;
+
+        self.printer.client.send(op, "Send-Document").await?;
+        if last {
+            self.closed = true;
+        }
+        Ok(())
+    }
+
+    /// Closes the job, so the printer stops waiting for documents and starts
+    /// printing.
+    ///
+    /// Not needed when the last document was added with `last` set.
+    pub async fn close(mut self) -> Result<JobId> {
+        if self.closed {
+            return Ok(self.id);
+        }
+
+        let mut request = self.printer.client.job_action_request(
+            // The ipp crate's Operation enum has no Close-Job, so the opcode
+            // is written directly, as for Identify-Printer.
+            Operation::CancelJob,
+            self.printer.uri.clone(),
+            self.id,
+        )?;
+        request.header_mut().operation_or_status = CLOSE_JOB;
+
+        self.printer.client.send(request, "Close-Job").await?;
+        self.closed = true;
+        Ok(self.id)
+    }
+
+    /// Abandons the job, removing it from the printer.
+    pub async fn cancel(self) -> Result<()> {
+        self.printer.cancel_job(self.id).await
+    }
+}
+
+/// Builds a [`CupsClient`] with transport options set.
+///
+/// The plain constructors cover the common case of an unencrypted local
+/// daemon. This is for everything else: TLS trust, timeouts, and talking to a
+/// printer directly.
+pub struct CupsClientBuilder {
+    uri: String,
+    user: Option<String>,
+    basic_auth: Option<(String, String)>,
+    request_timeout: Option<std::time::Duration>,
+    #[cfg(feature = "tls")]
+    ca_certs: Vec<Vec<u8>>,
+    #[cfg(feature = "tls")]
+    accept_invalid_certs: bool,
+}
+
+impl CupsClientBuilder {
+    fn new(uri: &str) -> Self {
+        CupsClientBuilder {
+            uri: uri.to_string(),
+            user: None,
+            basic_auth: None,
+            request_timeout: None,
+            #[cfg(feature = "tls")]
+            ca_certs: Vec::new(),
+            #[cfg(feature = "tls")]
+            accept_invalid_certs: false,
+        }
+    }
+
+    /// The name sent as `requesting-user-name`.
+    ///
+    /// Defaults to `$USER`, or `anonymous` where that is unset. CUPS uses it
+    /// to decide which jobs are yours.
+    pub fn user(mut self, user: &str) -> Self {
+        self.user = Some(user.to_string());
+        self
+    }
+
+    /// How long a single request may take, including the upload of a document.
+    ///
+    /// There is no timeout by default, because a large print job legitimately
+    /// takes a long time and a deadline that cuts one off is worse than none.
+    /// Set one for interactive requests, where an unreachable printer would
+    /// otherwise hang the caller indefinitely.
+    pub fn request_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.request_timeout = Some(timeout);
+        self
+    }
+
+    /// Sends HTTP Basic credentials with every request.
+    ///
+    /// This is what CUPS asks for by default: an administrative operation on
+    /// an unauthenticated connection is refused with `401`, and the daemon
+    /// replies `WWW-Authenticate: Basic realm="CUPS"`.
+    ///
+    /// Basic authentication transmits the password in a trivially reversible
+    /// encoding, so anything that can read the connection can read the
+    /// password. Over `ipps://` that is fine, because TLS covers it. Over
+    /// plain `ipp://` to anything but a loopback address it is not, and this
+    /// logs a warning at build time saying so.
+    ///
+    /// Only Basic is available: the underlying IPP transport does not
+    /// implement Digest or Negotiate, so a daemon configured to require either
+    /// cannot be satisfied from here.
+    pub fn basic_auth(mut self, user: &str, password: &str) -> Self {
+        self.basic_auth = Some((user.to_string(), password.to_string()));
+        self
+    }
+
+    /// Trusts an additional root certificate, in PEM or DER form.
+    ///
+    /// This is the right way to reach a printer over `ipps://`. Printers, and
+    /// CUPS itself, ship self-signed certificates that no public root will
+    /// vouch for, so verification fails against them by default with
+    /// `UnknownIssuer`. Pinning the certificate keeps verification on.
+    #[cfg(feature = "tls")]
+    pub fn ca_cert(mut self, certificate: impl AsRef<[u8]>) -> Self {
+        self.ca_certs.push(certificate.as_ref().to_vec());
+        self
+    }
+
+    /// Accepts any certificate, valid or not.
+    ///
+    /// This disables the check that the peer is who it claims to be, so an
+    /// `ipps://` connection becomes encrypted but unauthenticated and offers
+    /// no protection against interception. Prefer [`CupsClientBuilder::ca_cert`].
+    ///
+    /// It exists because discovering a printer's certificate is sometimes
+    /// impractical, and because a caller who has decided to accept that risk
+    /// on a trusted network should not have to abandon this crate to do it.
+    #[cfg(feature = "tls")]
+    pub fn danger_accept_invalid_certs(mut self, accept: bool) -> Self {
+        self.accept_invalid_certs = accept;
+        self
+    }
+
+    /// Builds the client.
+    pub fn build(self) -> Result<CupsClient> {
+        let parsed: Uri = self
+            .uri
+            .parse()
+            .map_err(|e| Error::transport_msg(format!("bad uri {}: {e}", self.uri)))?;
+
+        let mut builder = AsyncIppClient::builder(parsed.clone());
+        if let Some(timeout) = self.request_timeout {
+            builder = builder.request_timeout(timeout);
+        }
+        if let Some((user, password)) = &self.basic_auth {
+            if !is_confidential(&parsed) {
+                tracing::warn!(
+                    uri = %self.uri,
+                    "sending Basic credentials over an unencrypted connection to a \
+                     non-loopback host; anything on the path can read the password"
+                );
+            }
+            builder = builder.basic_auth(user, password);
+        }
+        #[cfg(feature = "tls")]
+        {
+            for certificate in self.ca_certs {
+                builder = builder.ca_cert(certificate);
+            }
+            if self.accept_invalid_certs {
+                builder = builder.ignore_tls_errors(true);
+            }
+        }
+
+        let user = self.user.unwrap_or_else(default_user);
+        Ok(CupsClient {
+            inner: builder.build(),
+            base: self.uri.trim_end_matches('/').to_string(),
+            user,
+            default_cache: Mutex::new(None),
+        })
+    }
+}
+
+/// Whether credentials sent to this URI are protected from onlookers, either
+/// by TLS or by never leaving the machine.
+fn is_confidential(uri: &Uri) -> bool {
+    if uri.scheme_str() == Some("https") || uri.scheme_str() == Some("ipps") {
+        return true;
+    }
+    matches!(
+        uri.host(),
+        Some("localhost" | "127.0.0.1" | "::1" | "[::1]")
+    )
+}
+
+/// The user CUPS attributes jobs to when none is given.
+fn default_user() -> String {
+    std::env::var("USER").unwrap_or_else(|_| "anonymous".to_string())
+}
+
+/// IPP operations the `ipp` crate's `Operation` enum predates.
 const IDENTIFY_PRINTER: i16 = 0x003C;
+const CLOSE_JOB: i16 = 0x003B;
 
 /// How a printer should announce itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -474,6 +931,7 @@ impl<'a> PpdFilter<'a> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Which jobs [`CupsClient::jobs`] should return.
 pub enum WhichJobs {
     /// Jobs still in the queue.
     NotCompleted,
@@ -509,7 +967,7 @@ impl CupsClient {
         id: JobId,
     ) -> Result<IppRequestResponse> {
         let mut request = IppRequestResponse::new(IppVersion::v1_1(), operation, Some(uri))
-            .map_err(|e| Error::Transport(e.to_string()))?;
+            .map_err(Error::transport)?;
 
         for (name, value) in [
             ("job-id", IppValue::Integer(id)),
@@ -630,7 +1088,7 @@ impl CupsClient {
     /// a `client-error-not-authorized` back rather than a silent no-op.
     pub async fn purge_jobs(&self, printer: &str) -> Result<()> {
         let op = PurgeJobs::new(self.printer_uri(printer)?, Some(self.user.as_str()))
-            .map_err(|e| Error::Transport(e.to_string()))?;
+            .map_err(Error::transport)?;
         self.send(op, "Purge-Jobs").await?;
         Ok(())
     }
@@ -647,8 +1105,7 @@ impl CupsClient {
         Ok(())
     }
 
-    /// The same, against a printer identified by URI.
-    pub async fn identify_printer_at(&self, uri: Uri, action: IdentifyAction) -> Result<()> {
+    pub(crate) async fn identify_printer_at(&self, uri: Uri, action: IdentifyAction) -> Result<()> {
         let request = self.identify_printer_request(uri, action)?;
         self.send(request, "Identify-Printer").await?;
         Ok(())
@@ -669,7 +1126,7 @@ impl CupsClient {
             Operation::GetPrinterAttributes,
             Some(uri),
         )
-        .map_err(|e| Error::Transport(e.to_string()))?;
+        .map_err(Error::transport)?;
         request.header_mut().operation_or_status = IDENTIFY_PRINTER;
 
         request.attributes_mut().add(
@@ -729,11 +1186,7 @@ impl CupsClient {
             .await
     }
 
-    /// The same, against a printer identified by URI.
-    ///
-    /// Pairs with [`CupsClient::print_stream_at`]: ask first, then stream, so a
-    /// remote printer rejects the format before the upload rather than after.
-    pub async fn validate_job_at(&self, uri: Uri, document_format: &str) -> Result<()> {
+    pub(crate) async fn validate_job_at(&self, uri: Uri, document_format: &str) -> Result<()> {
         let request = self.validate_job_request(uri, document_format)?;
         self.send(request, "Validate-Job").await?;
         Ok(())
@@ -747,7 +1200,7 @@ impl CupsClient {
     ) -> Result<IppRequestResponse> {
         let mut request =
             IppRequestResponse::new(IppVersion::v1_1(), Operation::ValidateJob, Some(uri))
-                .map_err(|e| Error::Transport(e.to_string()))?;
+                .map_err(Error::transport)?;
 
         for (name, value) in [
             (
@@ -789,11 +1242,15 @@ use std::time::Duration;
 
 impl CupsClient {
     /// Reads one queue's attributes, addressing it by its full IPP URI.
+    /// Reads a printer by URI.
+    ///
+    /// Equivalent to `client.at(uri)?.attributes()`, kept because reading a
+    /// printer's own advertisement is a common one-shot.
     pub async fn printer_at(&self, uri: &str) -> Result<Printer> {
         let parsed: Uri = uri
             .parse()
-            .map_err(|e| Error::Transport(format!("bad printer uri {uri}: {e}")))?;
-        let op = GetPrinterAttributes::new(parsed).map_err(|e| Error::Transport(e.to_string()))?;
+            .map_err(|e| Error::transport_msg(format!("bad printer uri {uri}: {e}")))?;
+        let op = GetPrinterAttributes::new(parsed).map_err(Error::transport)?;
         let resp = self.send(op, "Get-Printer-Attributes").await?;
 
         resp.attributes()
@@ -921,7 +1378,7 @@ impl CupsClient {
             Some(job_name),
             Some(document_format),
         )
-        .map_err(|e| Error::Transport(e.to_string()))?;
+        .map_err(Error::transport)?;
 
         let resp = self.send(op, "Print-Job").await?;
         Self::decode_job_id(&resp)
@@ -957,12 +1414,7 @@ impl CupsClient {
         .await
     }
 
-    /// The same, against a printer identified by URI rather than by queue name.
-    ///
-    /// A queue on this daemon is addressable either way, but an IPP printer
-    /// reached directly - a driverless network printer, or one on another host
-    /// - has no local queue name to give.
-    pub async fn print_stream_at<R>(
+    pub(crate) async fn print_stream_at<R>(
         &self,
         uri: Uri,
         reader: R,
@@ -975,8 +1427,7 @@ impl CupsClient {
         use tokio_util::compat::TokioAsyncReadCompatExt;
 
         let cleanup_uri = uri.clone();
-        let create = CreateJob::new(uri.clone(), Some(job_name))
-            .map_err(|e| Error::Transport(e.to_string()))?;
+        let create = CreateJob::new(uri.clone(), Some(job_name)).map_err(Error::transport)?;
         let resp = self.send(create, "Create-Job").await?;
         let job = Self::decode_job_id(&resp)?;
 
@@ -988,7 +1439,7 @@ impl CupsClient {
             document_format,
             true,
         )
-        .map_err(|e| Error::Transport(e.to_string()))?;
+        .map_err(Error::transport)?;
 
         match self.send(send, "Send-Document").await {
             Ok(_) => Ok(job),
@@ -1267,6 +1718,21 @@ mod tests {
                 .ends_with("/printers/Office-Laser"),
             "the destination queue is where the job is moved to"
         );
+    }
+
+    #[test]
+    fn loopback_and_tls_are_confidential_but_plain_remote_is_not() {
+        let confidential = |u: &str| super::is_confidential(&u.parse().unwrap());
+
+        // Never leaves the machine.
+        assert!(confidential("http://localhost:631"));
+        assert!(confidential("http://127.0.0.1:631"));
+        // Encrypted on the wire.
+        assert!(confidential("ipps://printer.example:631"));
+        assert!(confidential("https://printer.example:631"));
+        // A password here is readable by anything on the path.
+        assert!(!confidential("http://printer.example:631"));
+        assert!(!confidential("ipp://192.168.1.10:631"));
     }
 
     #[test]
