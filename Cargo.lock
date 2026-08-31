@@ -840,9 +840,8 @@ checksum = "6a756c3fac73139e83f14c2d742155dd2b78d3ee56597b419a0579b7bdd6dd78"
 
 [[package]]
 name = "ipp"
-version = "7.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9dac83d4cb04551421ba7ec91c5c618883d208086e2fcd4ef01561adb91be57b"
+version = "8.0.0"
+source = "git+https://github.com/ancwrd1/ipp.rs?rev=51d25fd#51d25fd2a8b1a1e9605a262e6524c1d695484f7b"
 dependencies = [
  "base64 0.23.1",
  "bytes",

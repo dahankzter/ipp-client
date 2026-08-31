@@ -10,6 +10,11 @@ repository.workspace = true
 readme = "README.md"
 rust-version = "1.93"
 
+# docs.rs builds with default features only, which would hide the TLS API.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [features]
 # TLS is on by default because `ipps://` is what driverless printers advertise.
 #
@@ -36,7 +41,7 @@ tokio-util = { version = "0.7", default-features = false, features = ["compat"] 
 async-stream = "0.3"
 
 [dev-dependencies]
-tokio = { version = "1.49", default-features = false, features = ["macros", "rt"] }
+tokio = { version = "1.49", default-features = false, features = ["macros", "rt", "rt-multi-thread"] }
 criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }
 
 [[bench]]

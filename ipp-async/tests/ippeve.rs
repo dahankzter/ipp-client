@@ -3,6 +3,7 @@
 mod common;
 
 use common::IppEvePrinter;
+use ipp::prelude::IppValue;
 use ipp_async::IppClient;
 
 #[tokio::test]
@@ -250,4 +251,44 @@ async fn close_job_reaches_the_printer_as_close_job() {
         printer.await_spooled_document(payload.len() as u64).await,
         "the document printed"
     );
+}
+
+#[tokio::test]
+#[ignore = "requires the ippeveprinter binary"]
+async fn a_bare_printer_answers_or_refuses_every_operation_clearly() {
+    // ippeveprinter implements a subset. What matters is that each operation
+    // reaches it and comes back with the printer's own status rather than a
+    // parse failure or a hang, so a caller can tell "not supported here" from
+    // "broken".
+    let printer = IppEvePrinter::start("test-queue").await;
+    let client = IppClient::with_uri(&printer.uri(), "tester").unwrap();
+    let p = client.at(&printer.printer_uri()).unwrap();
+
+    for (name, result) in [
+        ("disable", p.disable().await),
+        ("enable", p.enable().await),
+        ("hold_new_jobs", p.hold_new_jobs().await),
+        ("release_held_new_jobs", p.release_held_new_jobs().await),
+        ("cancel_my_jobs", p.cancel_my_jobs().await),
+        ("cancel_all_jobs", p.cancel_all_jobs().await),
+        (
+            "set_attributes",
+            p.set_attributes(&[(
+                "printer-info",
+                IppValue::TextWithoutLanguage("desk".try_into().unwrap()),
+            )])
+            .await,
+        ),
+    ] {
+        match result {
+            Ok(()) => eprintln!("  {name}: accepted"),
+            Err(e) => {
+                assert!(
+                    !e.to_string().contains("Invalid tag"),
+                    "{name} failed to parse rather than being refused: {e}"
+                );
+                eprintln!("  {name}: refused as {e}");
+            }
+        }
+    }
 }

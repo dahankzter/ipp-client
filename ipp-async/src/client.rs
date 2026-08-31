@@ -11,7 +11,9 @@ use tracing::warn;
 
 use std::sync::Mutex;
 
-use crate::{Class, Error, Job, JobId, Ppd, Printer, Result, lpoptions};
+use crate::attrs::Attrs;
+use crate::subscription::{Notification, Notifications, NotifyEvent, Subscription};
+use crate::{Class, Document, Error, Job, JobId, Ppd, Printer, Result, lpoptions};
 
 const LOCAL_CUPS: &str = "http://localhost:631";
 
@@ -628,6 +630,312 @@ impl IppPrinter<'_> {
         })
     }
 
+    /// Lists the documents in a job.
+    ///
+    /// Part of IPP's Document Object extension, which many printers do not
+    /// implement - CUPS included. An unsupporting server answers
+    /// `ServerErrorOperationNotSupported`, which arrives as an error rather
+    /// than an empty list, so "no documents" and "cannot tell you" stay
+    /// distinguishable.
+    pub async fn documents(&self, job: JobId) -> Result<Vec<Document>> {
+        let mut request = self.raw_request(GET_DOCUMENTS)?;
+        Self::add_int(&mut request, "job-id", job)?;
+        let resp = self.client.send(request, "Get-Documents").await?;
+        Ok(crate::subscription::decode_all(
+            &resp,
+            DelimiterTag::DocumentAttributes,
+            Document::decode,
+            "document",
+        ))
+    }
+
+    /// Asks whether a document in this format would be accepted into an
+    /// existing job, without sending it.
+    ///
+    /// The per-document counterpart to [`IppPrinter::validate`], for jobs
+    /// being built up with [`IppPrinter::create_job`].
+    pub async fn validate_document(&self, job: JobId, document_format: &str) -> Result<()> {
+        let mut request = self.raw_request(VALIDATE_DOCUMENT)?;
+        Self::add_int(&mut request, "job-id", job)?;
+        request.attributes_mut().add(
+            DelimiterTag::OperationAttributes,
+            IppAttribute::with_name(
+                "document-format",
+                IppValue::MimeMediaType(
+                    document_format
+                        .try_into()
+                        .map_err(|_| Error::decode("document-format", "value too long"))?,
+                ),
+            )
+            .map_err(|e| Error::decode("document-format", e.to_string()))?,
+        );
+        self.client.send(request, "Validate-Document").await?;
+        Ok(())
+    }
+
+    /// Stops the printer accepting new jobs. Queued work still prints.
+    ///
+    /// The counterpart to [`IppPrinter::pause`], which stops printing but
+    /// keeps accepting. A queue can be in either state independently.
+    pub async fn disable(&self) -> Result<()> {
+        self.raw_action(DISABLE_PRINTER, "Disable-Printer").await
+    }
+
+    /// Starts accepting new jobs again.
+    pub async fn enable(&self) -> Result<()> {
+        self.raw_action(ENABLE_PRINTER, "Enable-Printer").await
+    }
+
+    /// Accepts new jobs but holds them instead of printing them.
+    pub async fn hold_new_jobs(&self) -> Result<()> {
+        self.raw_action(HOLD_NEW_JOBS, "Hold-New-Jobs").await
+    }
+
+    /// Releases jobs held by [`IppPrinter::hold_new_jobs`].
+    pub async fn release_held_new_jobs(&self) -> Result<()> {
+        self.raw_action(RELEASE_HELD_NEW_JOBS, "Release-Held-New-Jobs")
+            .await
+    }
+
+    /// Cancels every job this user owns on the printer.
+    pub async fn cancel_my_jobs(&self) -> Result<()> {
+        self.raw_action(CANCEL_MY_JOBS, "Cancel-My-Jobs").await
+    }
+
+    /// Cancels every job on the printer, whoever owns it. Administrative.
+    pub async fn cancel_all_jobs(&self) -> Result<()> {
+        self.raw_action(CANCEL_JOBS, "Cancel-Jobs").await
+    }
+
+    /// Prints a finished job again as a new job.
+    ///
+    /// Unlike [`IppPrinter::restart_job`], which revives the original, this
+    /// creates a copy and leaves the first alone. Both need the printer to
+    /// still hold the document.
+    pub async fn resubmit_job(&self, id: JobId) -> Result<JobId> {
+        let mut request = self.raw_request(RESUBMIT_JOB)?;
+        Self::add_int(&mut request, "job-id", id)?;
+        let resp = self.client.send(request, "Resubmit-Job").await?;
+        IppClient::decode_job_id(&resp)
+    }
+
+    /// Changes attributes of a queued job - its priority, or the options it
+    /// will print with.
+    ///
+    /// Attributes are IPP names and values, as the printer advertises them:
+    /// `job-priority` as an integer, `media` as a keyword. Only jobs that
+    /// have not started can be changed, and only by their owner or an
+    /// administrator.
+    pub async fn set_job_attributes(
+        &self,
+        id: JobId,
+        attributes: &[(&str, IppValue)],
+    ) -> Result<()> {
+        let mut request = self.raw_request(SET_JOB_ATTRIBUTES)?;
+        Self::add_int(&mut request, "job-id", id)?;
+        for (name, value) in attributes {
+            request.attributes_mut().add(
+                DelimiterTag::JobAttributes,
+                IppAttribute::with_name(*name, value.clone())
+                    .map_err(|e| Error::decode(*name, e.to_string()))?,
+            );
+        }
+        self.client.send(request, "Set-Job-Attributes").await?;
+        Ok(())
+    }
+
+    /// Changes the printer's own attributes, such as the defaults new jobs
+    /// inherit. Administrative.
+    ///
+    /// The standard IPP way to set a queue's defaults. Against CUPS the same
+    /// thing can be done through `cups-pk-helper`, which is preferable on a
+    /// desktop because polkit asks for the password rather than this process.
+    pub async fn set_attributes(&self, attributes: &[(&str, IppValue)]) -> Result<()> {
+        let mut request = self.raw_request(SET_PRINTER_ATTRIBUTES)?;
+        for (name, value) in attributes {
+            request.attributes_mut().add(
+                DelimiterTag::PrinterAttributes,
+                IppAttribute::with_name(*name, value.clone())
+                    .map_err(|e| Error::decode(*name, e.to_string()))?,
+            );
+        }
+        self.client.send(request, "Set-Printer-Attributes").await?;
+        Ok(())
+    }
+
+    /// Asks the printer to remember these events until they are collected.
+    ///
+    /// The lease is a request, not a guarantee: a server may grant less, and
+    /// [`Subscription::lease`] is what it actually gave. `None` asks for no
+    /// expiry, which many servers will not grant.
+    pub async fn subscribe(
+        &self,
+        events: &[NotifyEvent],
+        lease: Option<std::time::Duration>,
+    ) -> Result<Subscription> {
+        let mut request = self.raw_request(CREATE_PRINTER_SUBSCRIPTIONS)?;
+
+        // Subscription attributes go in their own group, not with the
+        // operation attributes.
+        let keywords: Vec<IppValue> = events
+            .iter()
+            .map(|e| {
+                e.keyword()
+                    .try_into()
+                    .map(IppValue::Keyword)
+                    .map_err(|_| Error::decode("notify-events", "keyword too long"))
+            })
+            .collect::<Result<_>>()?;
+
+        request.attributes_mut().add(
+            DelimiterTag::SubscriptionAttributes,
+            IppAttribute::with_name("notify-events", IppValue::Array(keywords))
+                .map_err(|e| Error::decode("notify-events", e.to_string()))?,
+        );
+        request.attributes_mut().add(
+            DelimiterTag::SubscriptionAttributes,
+            // `ippget` means the client collects; the alternative is the
+            // server pushing to a URI, which needs somewhere to push to.
+            IppAttribute::with_name(
+                "notify-pull-method",
+                IppValue::Keyword(
+                    "ippget"
+                        .try_into()
+                        .map_err(|_| Error::decode("notify-pull-method", "keyword too long"))?,
+                ),
+            )
+            .map_err(|e| Error::decode("notify-pull-method", e.to_string()))?,
+        );
+        if let Some(lease) = lease {
+            request.attributes_mut().add(
+                DelimiterTag::SubscriptionAttributes,
+                IppAttribute::with_name(
+                    "notify-lease-duration",
+                    IppValue::Integer(lease.as_secs() as i32),
+                )
+                .map_err(|e| Error::decode("notify-lease-duration", e.to_string()))?,
+            );
+        }
+
+        let resp = self
+            .client
+            .send(request, "Create-Printer-Subscriptions")
+            .await?;
+        crate::subscription::decode_all(
+            &resp,
+            DelimiterTag::SubscriptionAttributes,
+            Subscription::decode,
+            "subscription",
+        )
+        .into_iter()
+        .next()
+        .ok_or_else(|| crate::subscription::missing("notify-subscription-id"))
+    }
+
+    /// Lists the subscriptions this user holds on the printer.
+    pub async fn subscriptions(&self) -> Result<Vec<Subscription>> {
+        let request = self.raw_request(GET_SUBSCRIPTIONS)?;
+        let resp = self.client.send(request, "Get-Subscriptions").await?;
+        Ok(crate::subscription::decode_all(
+            &resp,
+            DelimiterTag::SubscriptionAttributes,
+            Subscription::decode,
+            "subscription",
+        ))
+    }
+
+    /// Reads one subscription.
+    pub async fn subscription(&self, id: i32) -> Result<Subscription> {
+        let mut request = self.raw_request(GET_SUBSCRIPTION_ATTRIBUTES)?;
+        Self::add_int(&mut request, "notify-subscription-id", id)?;
+        let resp = self
+            .client
+            .send(request, "Get-Subscription-Attributes")
+            .await?;
+        crate::subscription::decode_all(
+            &resp,
+            DelimiterTag::SubscriptionAttributes,
+            Subscription::decode,
+            "subscription",
+        )
+        .into_iter()
+        .next()
+        .ok_or_else(|| crate::subscription::missing("notify-subscription-id"))
+    }
+
+    /// Collects what has happened since the last collection.
+    ///
+    /// Whether this returns at once or waits for something to happen is the
+    /// server's choice. See [`Notifications::poll_after`].
+    pub async fn notifications(&self, subscription_ids: &[i32]) -> Result<Notifications> {
+        let mut request = self.raw_request(GET_NOTIFICATIONS)?;
+        let ids: Vec<IppValue> = subscription_ids
+            .iter()
+            .copied()
+            .map(IppValue::Integer)
+            .collect();
+        request.attributes_mut().add(
+            DelimiterTag::OperationAttributes,
+            IppAttribute::with_name("notify-subscription-ids", IppValue::Array(ids))
+                .map_err(|e| Error::decode("notify-subscription-ids", e.to_string()))?,
+        );
+        request.attributes_mut().add(
+            DelimiterTag::OperationAttributes,
+            IppAttribute::with_name("notify-wait", IppValue::Boolean(false))
+                .map_err(|e| Error::decode("notify-wait", e.to_string()))?,
+        );
+
+        let resp = self.client.send(request, "Get-Notifications").await?;
+
+        let poll_after = resp
+            .attributes()
+            .groups_of(DelimiterTag::OperationAttributes)
+            .next()
+            .and_then(|g| Attrs::new(g).int("notify-get-interval"))
+            .filter(|i| *i > 0)
+            .map(|i| std::time::Duration::from_secs(i as u64));
+
+        Ok(Notifications {
+            events: crate::subscription::decode_all(
+                &resp,
+                DelimiterTag::EventNotificationAttributes,
+                Notification::decode,
+                "notification",
+            ),
+            poll_after,
+        })
+    }
+
+    /// Extends a subscription's life before it expires.
+    pub async fn renew_subscription(
+        &self,
+        id: i32,
+        lease: Option<std::time::Duration>,
+    ) -> Result<()> {
+        let mut request = self.raw_request(RENEW_SUBSCRIPTION)?;
+        Self::add_int(&mut request, "notify-subscription-id", id)?;
+        if let Some(lease) = lease {
+            request.attributes_mut().add(
+                DelimiterTag::SubscriptionAttributes,
+                IppAttribute::with_name(
+                    "notify-lease-duration",
+                    IppValue::Integer(lease.as_secs() as i32),
+                )
+                .map_err(|e| Error::decode("notify-lease-duration", e.to_string()))?,
+            );
+        }
+        self.client.send(request, "Renew-Subscription").await?;
+        Ok(())
+    }
+
+    /// Ends a subscription now rather than waiting for its lease to run out.
+    pub async fn cancel_subscription(&self, id: i32) -> Result<()> {
+        let mut request = self.raw_request(CANCEL_SUBSCRIPTION)?;
+        Self::add_int(&mut request, "notify-subscription-id", id)?;
+        self.client.send(request, "Cancel-Subscription").await?;
+        Ok(())
+    }
+
     async fn printer_action(&self, operation: Operation, label: &str) -> Result<()> {
         let mut request =
             IppRequestResponse::new(IppVersion::v1_1(), operation, Some(self.uri.clone()))
@@ -646,6 +954,54 @@ impl IppPrinter<'_> {
             )
             .map_err(|e| Error::decode("requesting-user-name", e.to_string()))?,
         );
+        self.client.send(request, label).await?;
+        Ok(())
+    }
+
+    /// A request for an operation the `ipp` crate's enum has no variant for.
+    ///
+    /// Built from a placeholder and overwritten, which is the crate's own
+    /// escape hatch. Carries the printer URI and the requesting user, as every
+    /// one of these operations needs both.
+    fn raw_request(&self, opcode: i16) -> Result<IppRequestResponse> {
+        let mut request = IppRequestResponse::new(
+            IppVersion::v1_1(),
+            Operation::GetPrinterAttributes,
+            Some(self.uri.clone()),
+        )
+        .map_err(Error::transport)?;
+        request.header_mut().operation_or_status = opcode;
+
+        request.attributes_mut().add(
+            DelimiterTag::OperationAttributes,
+            IppAttribute::with_name(
+                "requesting-user-name",
+                IppValue::NameWithoutLanguage(
+                    self.client
+                        .user
+                        .as_str()
+                        .try_into()
+                        .map_err(|_| Error::decode("requesting-user-name", "name too long"))?,
+                ),
+            )
+            .map_err(|e| Error::decode("requesting-user-name", e.to_string()))?,
+        );
+        Ok(request)
+    }
+
+    fn add_int(request: &mut IppRequestResponse, name: &'static str, value: i32) -> Result<()> {
+        request.attributes_mut().add(
+            DelimiterTag::OperationAttributes,
+            IppAttribute::with_name(name, IppValue::Integer(value))
+                .map_err(|e| Error::decode(name, e.to_string()))?,
+        );
+        Ok(())
+    }
+
+    /// Runs one of the hand-written-opcode operations that needs nothing but a
+    /// printer and a user.
+    async fn raw_action(&self, opcode: i16, label: &str) -> Result<()> {
+        let request = self.raw_request(opcode)?;
         self.client.send(request, label).await?;
         Ok(())
     }
@@ -893,8 +1249,29 @@ fn default_user() -> String {
 }
 
 /// IPP operations the `ipp` crate's `Operation` enum predates.
-const IDENTIFY_PRINTER: i16 = 0x003C;
+///
+/// Values from RFC 8011 and the IANA registry, cross-checked against libcups'
+/// `ipp.h`. Proposed upstream as ancwrd1/ipp.rs#68; until that lands and is
+/// released these go on the header directly.
+const CREATE_PRINTER_SUBSCRIPTIONS: i16 = 0x0016;
+const GET_SUBSCRIPTION_ATTRIBUTES: i16 = 0x0018;
+const GET_SUBSCRIPTIONS: i16 = 0x0019;
+const RENEW_SUBSCRIPTION: i16 = 0x001A;
+const CANCEL_SUBSCRIPTION: i16 = 0x001B;
+const GET_NOTIFICATIONS: i16 = 0x001C;
+const SET_PRINTER_ATTRIBUTES: i16 = 0x0013;
+const SET_JOB_ATTRIBUTES: i16 = 0x0014;
+const ENABLE_PRINTER: i16 = 0x0022;
+const DISABLE_PRINTER: i16 = 0x0023;
+const HOLD_NEW_JOBS: i16 = 0x0025;
+const RELEASE_HELD_NEW_JOBS: i16 = 0x0026;
+const CANCEL_JOBS: i16 = 0x0038;
+const CANCEL_MY_JOBS: i16 = 0x0039;
+const RESUBMIT_JOB: i16 = 0x003A;
+const GET_DOCUMENTS: i16 = 0x0035;
+const VALIDATE_DOCUMENT: i16 = 0x003D;
 const CLOSE_JOB: i16 = 0x003B;
+const IDENTIFY_PRINTER: i16 = 0x003C;
 
 /// How a printer should announce itself.
 #[derive(Debug, Clone, PartialEq, Eq)]

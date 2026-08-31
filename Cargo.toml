@@ -8,7 +8,10 @@ repository = "https://github.com/dahankzter/ipp-client"
 edition = "2024"
 
 [workspace.dependencies]
-ipp = { version = "7.0", default-features = false, features = ["async-client"] }
+# Upstream master, not a release: subscriptions need ancwrd1/ipp.rs#70,
+# which is merged but unreleased - without it the parser rejects a
+# subscription group outright. Pin to a version once 8.0.0 ships.
+ipp = { git = "https://github.com/ancwrd1/ipp.rs", rev = "51d25fd", default-features = false, features = ["async-client"] }
 zbus = { version = "5.14", default-features = false, features = ["tokio"] }
 tokio = { version = "1.49", features = ["full"] }
 futures = "0.3"
