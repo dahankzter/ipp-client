@@ -841,7 +841,7 @@ checksum = "6a756c3fac73139e83f14c2d742155dd2b78d3ee56597b419a0579b7bdd6dd78"
 [[package]]
 name = "ipp"
 version = "8.0.0"
-source = "git+https://github.com/dahankzter/ipp.rs?branch=all-three#ae33fa712b4799e8845d2d7da1c85bbc39923fb8"
+source = "git+https://github.com/ancwrd1/ipp.rs?rev=51d25fd#51d25fd2a8b1a1e9605a262e6524c1d695484f7b"
 dependencies = [
  "base64 0.23.1",
  "bytes",

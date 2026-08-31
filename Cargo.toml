@@ -8,11 +8,10 @@ repository = "https://github.com/dahankzter/ipp-client"
 edition = "2024"
 
 [workspace.dependencies]
-# TEMPORARY: a fork carrying three changes proposed upstream as
-# ancwrd1/ipp.rs#68, #69 and #70. Subscriptions cannot work without #70 -
-# the parser rejects a subscription group outright. Drop this for the
-# published crates.io release, which needs those merged and released.
-ipp = { git = "https://github.com/dahankzter/ipp.rs", branch = "all-three", default-features = false, features = ["async-client"] }
+# Upstream master, not a release: subscriptions need ancwrd1/ipp.rs#70,
+# which is merged but unreleased - without it the parser rejects a
+# subscription group outright. Pin to a version once 8.0.0 ships.
+ipp = { git = "https://github.com/ancwrd1/ipp.rs", rev = "51d25fd", default-features = false, features = ["async-client"] }
 zbus = { version = "5.14", default-features = false, features = ["tokio"] }
 tokio = { version = "1.49", features = ["full"] }
 futures = "0.3"
