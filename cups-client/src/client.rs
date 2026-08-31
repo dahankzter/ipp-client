@@ -165,6 +165,17 @@ impl CupsClient {
             .collect()
     }
 
+    /// The default-printer cache, surviving a poisoned lock.
+    ///
+    /// The cache is an optimisation, not state anything depends on, so a panic
+    /// in another thread must not turn every later call into a panic of its
+    /// own. The stored value is unaffected by whatever went wrong elsewhere.
+    fn cache_lock(&self) -> std::sync::MutexGuard<'_, Option<Option<String>>> {
+        self.default_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// The server's own default queue, via `CUPS-Get-Default`.
     pub(crate) async fn server_default(&self) -> Result<Option<String>> {
         let mut request =
@@ -174,6 +185,7 @@ impl CupsClient {
             DelimiterTag::OperationAttributes,
             IppAttribute::with_name(
                 "requested-attributes",
+                // Infallible: a 12-byte literal is inside the keyword bound.
                 IppValue::Keyword("printer-name".try_into().unwrap()),
             )
             .map_err(|e| Error::decode("requested-attributes", e.to_string()))?,
@@ -195,7 +207,7 @@ impl CupsClient {
     /// `lpoptions` file. Call `invalidate_default_printer_cache` to force a
     /// fresh lookup (the poll loop does this on every resynchronisation).
     pub async fn default_printer(&self) -> Option<String> {
-        if let Some(cached) = self.default_cache.lock().unwrap().clone() {
+        if let Some(cached) = self.cache_lock().clone() {
             return cached;
         }
 
@@ -210,14 +222,14 @@ impl CupsClient {
             },
         };
 
-        *self.default_cache.lock().unwrap() = Some(resolved.clone());
+        *self.cache_lock() = Some(resolved.clone());
         resolved
     }
 
     /// Forces the next `default_printer` call to resolve again instead of
     /// reusing the cached value.
     pub(crate) fn invalidate_default_printer_cache(&self) {
-        *self.default_cache.lock().unwrap() = None;
+        *self.cache_lock() = None;
     }
 
     /// Attributes `Printer::decode` needs. Without this, `CUPS-Get-Printers`
@@ -721,6 +733,7 @@ impl IppJob<'_> {
 pub struct CupsClientBuilder {
     uri: String,
     user: Option<String>,
+    basic_auth: Option<(String, String)>,
     request_timeout: Option<std::time::Duration>,
     #[cfg(feature = "tls")]
     ca_certs: Vec<Vec<u8>>,
@@ -733,6 +746,7 @@ impl CupsClientBuilder {
         CupsClientBuilder {
             uri: uri.to_string(),
             user: None,
+            basic_auth: None,
             request_timeout: None,
             #[cfg(feature = "tls")]
             ca_certs: Vec::new(),
@@ -758,6 +772,26 @@ impl CupsClientBuilder {
     /// otherwise hang the caller indefinitely.
     pub fn request_timeout(mut self, timeout: std::time::Duration) -> Self {
         self.request_timeout = Some(timeout);
+        self
+    }
+
+    /// Sends HTTP Basic credentials with every request.
+    ///
+    /// This is what CUPS asks for by default: an administrative operation on
+    /// an unauthenticated connection is refused with `401`, and the daemon
+    /// replies `WWW-Authenticate: Basic realm="CUPS"`.
+    ///
+    /// Basic authentication transmits the password in a trivially reversible
+    /// encoding, so anything that can read the connection can read the
+    /// password. Over `ipps://` that is fine, because TLS covers it. Over
+    /// plain `ipp://` to anything but a loopback address it is not, and this
+    /// logs a warning at build time saying so.
+    ///
+    /// Only Basic is available: the underlying IPP transport does not
+    /// implement Digest or Negotiate, so a daemon configured to require either
+    /// cannot be satisfied from here.
+    pub fn basic_auth(mut self, user: &str, password: &str) -> Self {
+        self.basic_auth = Some((user.to_string(), password.to_string()));
         self
     }
 
@@ -795,9 +829,19 @@ impl CupsClientBuilder {
             .parse()
             .map_err(|e| Error::transport_msg(format!("bad uri {}: {e}", self.uri)))?;
 
-        let mut builder = AsyncIppClient::builder(parsed);
+        let mut builder = AsyncIppClient::builder(parsed.clone());
         if let Some(timeout) = self.request_timeout {
             builder = builder.request_timeout(timeout);
+        }
+        if let Some((user, password)) = &self.basic_auth {
+            if !is_confidential(&parsed) {
+                tracing::warn!(
+                    uri = %self.uri,
+                    "sending Basic credentials over an unencrypted connection to a \
+                     non-loopback host; anything on the path can read the password"
+                );
+            }
+            builder = builder.basic_auth(user, password);
         }
         #[cfg(feature = "tls")]
         {
@@ -817,6 +861,18 @@ impl CupsClientBuilder {
             default_cache: Mutex::new(None),
         })
     }
+}
+
+/// Whether credentials sent to this URI are protected from onlookers, either
+/// by TLS or by never leaving the machine.
+fn is_confidential(uri: &Uri) -> bool {
+    if uri.scheme_str() == Some("https") || uri.scheme_str() == Some("ipps") {
+        return true;
+    }
+    matches!(
+        uri.host(),
+        Some("localhost" | "127.0.0.1" | "::1" | "[::1]")
+    )
 }
 
 /// The user CUPS attributes jobs to when none is given.
@@ -1658,6 +1714,21 @@ mod tests {
                 .ends_with("/printers/Office-Laser"),
             "the destination queue is where the job is moved to"
         );
+    }
+
+    #[test]
+    fn loopback_and_tls_are_confidential_but_plain_remote_is_not() {
+        let confidential = |u: &str| super::is_confidential(&u.parse().unwrap());
+
+        // Never leaves the machine.
+        assert!(confidential("http://localhost:631"));
+        assert!(confidential("http://127.0.0.1:631"));
+        // Encrypted on the wire.
+        assert!(confidential("ipps://printer.example:631"));
+        assert!(confidential("https://printer.example:631"));
+        // A password here is readable by anything on the path.
+        assert!(!confidential("http://printer.example:631"));
+        assert!(!confidential("ipp://192.168.1.10:631"));
     }
 
     #[test]
